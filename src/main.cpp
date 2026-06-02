@@ -77,6 +77,7 @@ void print_usage(std::ostream& out) {
       << "  cxxmcp-gatewayd status [--admin-url <url>]\n"
       << "  cxxmcp-gatewayd upstreams [--admin-url <url>]\n"
       << "  cxxmcp-gatewayd events [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd diagnostics [--admin-url <url>]\n"
       << "  cxxmcp-gatewayd reload [--admin-url <url>]\n"
       << "  cxxmcp-gatewayd upstream enable <profile> <upstream> "
          "[--admin-url <url>]\n"
@@ -857,6 +858,27 @@ int run_admin_cli(std::vector<std::string_view> args) {
     tool = "gatewayd.upstreams";
   } else if (args[0] == "events") {
     tool = "gatewayd.events";
+  } else if (args[0] == "diagnostics") {
+    for (const auto& item :
+         {std::pair<std::string_view, std::string_view>{"status",
+                                                        "gatewayd.health"},
+          std::pair<std::string_view, std::string_view>{"upstreams",
+                                                        "gatewayd.upstreams"},
+          std::pair<std::string_view, std::string_view>{"events",
+                                                        "gatewayd.events"}}) {
+      std::cout << "== " << item.first << " ==\n";
+      auto result = call_admin_tool(admin_url, item.second);
+      if (!result) {
+        std::cerr << "admin command failed: " << result.error().message;
+        if (!result.error().detail.empty()) {
+          std::cerr << ": " << result.error().detail;
+        }
+        std::cerr << "\n";
+        return 1;
+      }
+      print_tool_result(*result);
+    }
+    return 0;
   } else if (args[0] == "reload") {
     tool = "gatewayd.reload";
   } else if (args[0] == "upstream" && args.size() == 4 &&
@@ -971,7 +993,8 @@ int main(int argc, char** argv) {
   }
 
   if (args[0] == "status" || args[0] == "upstreams" ||
-      args[0] == "events" || args[0] == "reload" ||
+      args[0] == "events" || args[0] == "diagnostics" ||
+      args[0] == "reload" ||
       args[0] == "upstream") {
     return run_admin_cli(std::move(args));
   }

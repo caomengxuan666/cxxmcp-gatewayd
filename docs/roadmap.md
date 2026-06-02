@@ -31,7 +31,7 @@ Current status:
 - `gatewayd.health`, `gatewayd.upstreams`, and `gatewayd.events` provide the
   first status/event surface;
 - CLI management commands cover `status`, `upstreams`, `events`, `reload`, and
-  upstream enable/disable;
+  upstream enable/disable, plus `diagnostics`;
 - loopback defaults are documented for the current local middleware mode.
 
 ## Phase 2: Operational Service
@@ -42,6 +42,15 @@ Current status:
 - packaged binaries;
 - crash-safe shutdown and restart behavior;
 - logs and diagnostics.
+
+Current status:
+
+- CPack ZIP/TGZ packaging is configured;
+- Windows service scripts, systemd unit, and launchd plist templates are
+  included under `packaging/`;
+- `diagnostics` aggregates status, upstreams, and events through the admin
+  endpoint;
+- service-manager restart templates provide the first restart-on-failure shape.
 
 ## Phase 3: Policy And Security
 

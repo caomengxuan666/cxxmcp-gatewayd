@@ -79,6 +79,7 @@ The default admin CLI target is `http://127.0.0.1:39932/admin`. Override it with
 build\cxxmcp-gatewayd.exe status
 build\cxxmcp-gatewayd.exe upstreams
 build\cxxmcp-gatewayd.exe events
+build\cxxmcp-gatewayd.exe diagnostics
 build\cxxmcp-gatewayd.exe reload
 build\cxxmcp-gatewayd.exe upstream enable default filesystem
 build\cxxmcp-gatewayd.exe upstream disable default filesystem
@@ -139,3 +140,19 @@ Those stay in `cxxmcp` and `cxxmcp-gateway`.
 The daemon examples bind MCP and admin endpoints to `127.0.0.1`. Binding either
 endpoint outside loopback is a deployment/security decision and should not be
 treated as the default local middleware mode.
+
+## Packaging
+
+The build installs the daemon, sample config, docs, and service templates.
+CPack produces a ZIP package on Windows and a TGZ package elsewhere:
+
+```powershell
+cmake --build build --target package
+```
+
+Service templates live under `packaging/`:
+
+- `packaging/windows/install-service.ps1`
+- `packaging/windows/uninstall-service.ps1`
+- `packaging/systemd/cxxmcp-gatewayd.service`
+- `packaging/launchd/com.cxxmcp.gatewayd.plist`

@@ -1,0 +1,14 @@
+[Unit]
+Description=cxxmcp gateway daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cxxmcp-gatewayd run --config /etc/cxxmcp-gatewayd/gatewayd.json
+Restart=on-failure
+RestartSec=2s
+User=cxxmcp
+Group=cxxmcp
+
+[Install]
+WantedBy=multi-user.target

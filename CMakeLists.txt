@@ -51,6 +51,17 @@ set_target_properties(cxxmcp_gatewayd PROPERTIES
 install(TARGETS cxxmcp_gatewayd
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
 )
+install(FILES examples/gatewayd.example.json
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/cxxmcp-gatewayd/examples"
+)
+install(FILES
+        docs/architecture.md
+        docs/roadmap.md
+    DESTINATION "${CMAKE_INSTALL_DOCDIR}"
+)
+install(DIRECTORY packaging/
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/cxxmcp-gatewayd/packaging"
+)
 
 if(BUILD_TESTING)
     add_test(
@@ -62,3 +73,17 @@ if(BUILD_TESTING)
         COMMAND cxxmcp_gatewayd validate --config "${CMAKE_CURRENT_SOURCE_DIR}/examples/gatewayd.example.json"
     )
 endif()
+
+set(CPACK_PACKAGE_NAME "cxxmcp-gatewayd")
+set(CPACK_PACKAGE_VENDOR "caomengxuan666")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "Local MCP middleware daemon built on cxxmcp-gateway")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_INSTALL_DIRECTORY "cxxmcp-gatewayd")
+set(CPACK_RESOURCE_FILE_README "${CMAKE_CURRENT_SOURCE_DIR}/README.md")
+if(WIN32)
+    set(CPACK_GENERATOR "ZIP")
+else()
+    set(CPACK_GENERATOR "TGZ")
+endif()
+include(CPack)
