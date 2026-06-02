@@ -90,6 +90,8 @@ build\cxxmcp-gatewayd.exe diagnostics
 build\cxxmcp-gatewayd.exe reload
 build\cxxmcp-gatewayd.exe upstream enable default filesystem
 build\cxxmcp-gatewayd.exe upstream disable default filesystem
+build\cxxmcp-gatewayd.exe profile runtime set default `
+  --session-mode persistent --pool-size 2 --prewarm true
 ```
 
 ## Current Admin Tools
@@ -105,6 +107,7 @@ build\cxxmcp-gatewayd.exe upstream disable default filesystem
 - `gatewayd.upstream.enable`
 - `gatewayd.upstream.disable`
 - `gatewayd.profile.restart`
+- `gatewayd.profile.runtime.set`
 
 `gatewayd.upstream.enable` and `gatewayd.upstream.disable` update the loaded
 config file and the in-memory desired config for one profile, then return
@@ -127,6 +130,17 @@ Restart argument:
 ```json
 {
   "profile": "default"
+}
+```
+
+Runtime edit argument:
+
+```json
+{
+  "profile": "default",
+  "upstreamSessionMode": "persistent",
+  "persistentSessionPoolSize": 2,
+  "prewarmCapabilities": true
 }
 ```
 

@@ -96,6 +96,8 @@ Current status:
 
 - admin API-backed dashboard data is available through `gatewayd.health`,
   `gatewayd.profiles`, `gatewayd.upstreams`, and `gatewayd.events`;
+- profile runtime editing is available through
+  `gatewayd.profile.runtime.set`;
 - upstream enable/disable controls are available through
   `gatewayd.upstream.enable` and `gatewayd.upstream.disable`;
 - catalog inspection is available through `gatewayd.catalog.tools`,

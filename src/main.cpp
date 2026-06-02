@@ -112,6 +112,10 @@ void print_usage(std::ostream& out) {
          "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd upstream disable <profile> <upstream> "
          "[--admin-url <url>] [--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd profile runtime set <profile> "
+         "[--session-mode <per-call|persistent>] [--pool-size <n>] "
+         "[--prewarm <true|false>] [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd --config <file>   # legacy alias for run\n\n"
       << "Config discovery without --config:\n"
       << "  1. CXXMCP_GATEWAYD_CONFIG\n"
@@ -498,6 +502,27 @@ std::string transport_to_string(
   return "unknown";
 }
 
+std::string session_mode_to_string(mcp::gateway::UpstreamSessionMode mode) {
+  switch (mode) {
+    case mcp::gateway::UpstreamSessionMode::per_call:
+      return "per-call";
+    case mcp::gateway::UpstreamSessionMode::persistent:
+      return "persistent";
+  }
+  return "per-call";
+}
+
+Json runtime_config_json(const mcp::gateway::GatewayRuntimeConfig& runtime) {
+  return Json{
+      {"upstreamSessionMode", session_mode_to_string(runtime.upstream_session_mode)},
+      {"persistentSessionPoolSize", runtime.persistent_session_pool_size},
+      {"persistentSessionAcquireTimeoutMs",
+       runtime.persistent_session_acquire_timeout.count()},
+      {"activeCallDrainTimeoutMs", runtime.active_call_drain_timeout.count()},
+      {"prewarmCapabilities", runtime.prewarm_capabilities},
+  };
+}
+
 Json state_health_json(const GatewaydState& state) {
   Json profiles = Json::array();
   for (const auto& profile : state.profiles) {
@@ -589,15 +614,7 @@ Json state_profiles_json(const GatewaydState& state) {
               {"path", profile->spec.endpoint.path},
               {"url", http_url(profile->spec.endpoint)}}},
         {"runtime",
-         Json{{"upstreamSessionMode",
-               profile->spec.runtime_config.upstream_session_mode ==
-                       mcp::gateway::UpstreamSessionMode::persistent
-                   ? "persistent"
-                   : "per-call"},
-              {"persistentSessionPoolSize",
-               profile->spec.runtime_config.persistent_session_pool_size},
-              {"prewarmCapabilities",
-               profile->spec.runtime_config.prewarm_capabilities}}},
+         runtime_config_json(profile->spec.runtime_config)},
         {"upstreams", std::move(upstreams)},
     });
   }
@@ -936,6 +953,150 @@ Json restart_profile_json(GatewaydState& state, const Json& args) {
       {"ok", true},
       {"profile", profile->spec.id},
       {"mcpUrl", http_url(profile->spec.endpoint)},
+  };
+}
+
+mcp::core::Result<mcp::core::Unit> persist_profile_runtime(
+    const std::string& path,
+    const std::string& profile_id,
+    const mcp::gateway::GatewayRuntimeConfig& runtime) {
+  Json root;
+  try {
+    root = Json::parse(read_text_file(path));
+  } catch (const std::exception& ex) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::ParseError),
+        "failed to parse gatewayd config for update", ex.what(),
+        "gatewayd.config"});
+  }
+
+  auto profiles = root.find("profiles");
+  if (profiles == root.end() || !profiles->is_array()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "gatewayd config requires a profiles array", "",
+        "gatewayd.config"});
+  }
+
+  for (auto& profile : *profiles) {
+    const auto id = profile.find("id");
+    if (id == profile.end() || !id->is_string() ||
+        id->get<std::string>() != profile_id) {
+      continue;
+    }
+    profile["runtime"] = runtime_config_json(runtime);
+    try {
+      write_text_file(path, root.dump(2) + "\n");
+    } catch (const std::exception& ex) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InternalError),
+          "failed to write gatewayd config", ex.what(),
+          "gatewayd.config"});
+    }
+    return mcp::core::Unit{};
+  }
+
+  return mcp::core::unexpected(mcp::core::Error{
+      static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+      "unknown profile in config", profile_id, "gatewayd.config"});
+}
+
+Json set_profile_runtime_json(GatewaydState& state, const Json& args) {
+  if (!args.is_object()) {
+    return usage_error_json("gatewayd.profile.runtime.set expects an object");
+  }
+  const auto profile_arg = args.find("profile");
+  if (profile_arg == args.end() || !profile_arg->is_string()) {
+    return usage_error_json("missing profile", "expected string field profile");
+  }
+
+  std::lock_guard lock(state.mutex);
+  auto profile = find_profile(state, profile_arg->get<std::string>());
+  if (!profile) {
+    return usage_error_json("unknown profile", profile_arg->get<std::string>());
+  }
+  if (state.config_path.empty()) {
+    return usage_error_json("missing config path",
+                            "persistent updates require a loaded config file");
+  }
+
+  auto next = profile->spec.runtime_config;
+  if (const auto mode = args.find("upstreamSessionMode");
+      mode != args.end()) {
+    if (!mode->is_string()) {
+      return usage_error_json("invalid upstreamSessionMode",
+                              "expected string");
+    }
+    const auto value = mode->get<std::string>();
+    if (value == "per_call" || value == "per-call") {
+      next.upstream_session_mode = mcp::gateway::UpstreamSessionMode::per_call;
+    } else if (value == "persistent") {
+      next.upstream_session_mode =
+          mcp::gateway::UpstreamSessionMode::persistent;
+    } else {
+      return usage_error_json("invalid upstreamSessionMode",
+                              "expected per-call or persistent");
+    }
+  }
+  if (const auto pool = args.find("persistentSessionPoolSize");
+      pool != args.end()) {
+    if (!pool->is_number_unsigned() || pool->get<std::size_t>() == 0) {
+      return usage_error_json("invalid persistentSessionPoolSize",
+                              "expected positive integer");
+    }
+    next.persistent_session_pool_size = pool->get<std::size_t>();
+  }
+  if (const auto acquire = args.find("persistentSessionAcquireTimeoutMs");
+      acquire != args.end()) {
+    if (!acquire->is_number_unsigned()) {
+      return usage_error_json("invalid persistentSessionAcquireTimeoutMs",
+                              "expected non-negative integer");
+    }
+    next.persistent_session_acquire_timeout =
+        std::chrono::milliseconds{acquire->get<std::int64_t>()};
+  }
+  if (const auto drain = args.find("activeCallDrainTimeoutMs");
+      drain != args.end()) {
+    if (!drain->is_number_unsigned()) {
+      return usage_error_json("invalid activeCallDrainTimeoutMs",
+                              "expected non-negative integer");
+    }
+    next.active_call_drain_timeout =
+        std::chrono::milliseconds{drain->get<std::int64_t>()};
+  }
+  if (const auto prewarm = args.find("prewarmCapabilities");
+      prewarm != args.end()) {
+    if (!prewarm->is_boolean()) {
+      return usage_error_json("invalid prewarmCapabilities",
+                              "expected boolean");
+    }
+    next.prewarm_capabilities = prewarm->get<bool>();
+  }
+
+  auto valid = mcp::gateway::validate_gateway_runtime_config(next);
+  if (!valid) {
+    return error_json(valid.error());
+  }
+
+  auto persisted = persist_profile_runtime(state.config_path, profile->spec.id,
+                                           next);
+  if (!persisted) {
+    record_event(state, "profile.runtime.update.failed",
+                 Json{{"profile", profile->spec.id},
+                      {"error", error_json(persisted.error())["error"]}});
+    return error_json(persisted.error());
+  }
+  profile->spec.runtime_config = next;
+  record_event(state, "profile.runtime.updated",
+               Json{{"profile", profile->spec.id},
+                    {"runtime", runtime_config_json(profile->spec.runtime_config)},
+                    {"persisted", true}});
+  return Json{
+      {"ok", true},
+      {"profile", profile->spec.id},
+      {"runtime", runtime_config_json(profile->spec.runtime_config)},
+      {"persisted", true},
+      {"runtimeRestartRequired", true},
   };
 }
 
@@ -1836,6 +1997,51 @@ int run_admin_cli(std::vector<std::string_view> args) {
         {"profile", std::string(args[2])},
         {"upstream", std::string(args[3])},
     };
+  } else if (args[0] == "profile" && args.size() >= 4 &&
+             args[1] == "runtime" && args[2] == "set") {
+    tool = "gatewayd.profile.runtime.set";
+    arguments = Json{{"profile", std::string(args[3])}};
+    for (std::size_t i = 4; i < args.size();) {
+      if (i + 1 >= args.size()) {
+        print_usage(std::cerr);
+        return 2;
+      }
+      const auto key = args[i];
+      const auto value = args[i + 1];
+      try {
+        if (key == "--session-mode") {
+          arguments["upstreamSessionMode"] = std::string(value);
+        } else if (key == "--pool-size") {
+          arguments["persistentSessionPoolSize"] =
+              static_cast<std::uint64_t>(
+                  std::stoull(std::string(value)));
+        } else if (key == "--session-acquire-timeout-ms") {
+          arguments["persistentSessionAcquireTimeoutMs"] =
+              static_cast<std::uint64_t>(
+                  std::stoull(std::string(value)));
+        } else if (key == "--active-call-drain-timeout-ms") {
+          arguments["activeCallDrainTimeoutMs"] =
+              static_cast<std::uint64_t>(
+                  std::stoull(std::string(value)));
+        } else if (key == "--prewarm") {
+          if (value == "true" || value == "1") {
+            arguments["prewarmCapabilities"] = true;
+          } else if (value == "false" || value == "0") {
+            arguments["prewarmCapabilities"] = false;
+          } else {
+            std::cerr << "--prewarm requires true or false\n";
+            return 2;
+          }
+        } else {
+          print_usage(std::cerr);
+          return 2;
+        }
+      } catch (const std::exception&) {
+        std::cerr << key << " requires an unsigned integer\n";
+        return 2;
+      }
+      i += 2;
+    }
   } else {
     print_usage(std::cerr);
     return 2;
@@ -1944,6 +2150,12 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
                 return ToolResult::text(
                     restart_profile_json(*state, args).dump(2));
               })
+          .tool<Json, ToolResult>(
+              "gatewayd.profile.runtime.set",
+              [state](const Json& args) {
+                return ToolResult::text(
+                    set_profile_runtime_json(*state, args).dump(2));
+              })
           .build();
   if (!peer) {
     return mcp::core::unexpected(peer.error());
@@ -1978,7 +2190,7 @@ int main(int argc, char** argv) {
       args[0] == "dashboard" ||
       args[0] == "events" || args[0] == "diagnostics" ||
       args[0] == "reload" ||
-      args[0] == "upstream") {
+      args[0] == "upstream" || args[0] == "profile") {
     return run_admin_cli(std::move(args));
   }
 

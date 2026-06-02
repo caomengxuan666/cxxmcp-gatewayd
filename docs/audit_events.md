@@ -31,6 +31,8 @@ Fields:
 - `config.reload.failed`
 - `profile.restarted`
 - `profile.restart.failed`
+- `profile.runtime.updated`
+- `profile.runtime.update.failed`
 - `upstream.enabled`
 - `upstream.disabled`
 - `upstream.enable.failed`
