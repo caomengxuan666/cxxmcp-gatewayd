@@ -92,8 +92,12 @@ void print_usage(std::ostream& out) {
       << "  cxxmcp-gatewayd run [--config <file>]\n"
       << "  cxxmcp-gatewayd status [--admin-url <url>] "
          "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd profiles [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd upstreams [--admin-url <url>] "
          "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd catalog <tools|resources|prompts> "
+         "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd events [--admin-url <url>] "
          "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd diagnostics [--admin-url <url>] "
@@ -561,6 +565,41 @@ Json state_upstreams_json(const GatewaydState& state) {
   return Json{{"profiles", std::move(profiles)}};
 }
 
+Json state_profiles_json(const GatewaydState& state) {
+  Json profiles = Json::array();
+  for (const auto& profile : state.profiles) {
+    Json upstreams = Json::array();
+    for (const auto& upstream : profile->spec.config.upstreams) {
+      upstreams.push_back(Json{
+          {"id", upstream.id},
+          {"displayName", upstream.display_name},
+          {"enabled", upstream.enabled},
+          {"transport", transport_to_string(upstream.transport)},
+      });
+    }
+    profiles.push_back(Json{
+        {"id", profile->spec.id},
+        {"endpoint",
+         Json{{"host", profile->spec.endpoint.host},
+              {"port", profile->spec.endpoint.port},
+              {"path", profile->spec.endpoint.path},
+              {"url", http_url(profile->spec.endpoint)}}},
+        {"runtime",
+         Json{{"upstreamSessionMode",
+               profile->spec.runtime_config.upstream_session_mode ==
+                       mcp::gateway::UpstreamSessionMode::persistent
+                   ? "persistent"
+                   : "per-call"},
+              {"persistentSessionPoolSize",
+               profile->spec.runtime_config.persistent_session_pool_size},
+              {"prewarmCapabilities",
+               profile->spec.runtime_config.prewarm_capabilities}}},
+        {"upstreams", std::move(upstreams)},
+    });
+  }
+  return Json{{"profiles", std::move(profiles)}};
+}
+
 Json state_catalog_tools_json(GatewaydState& state) {
   Json profiles = Json::array();
   for (const auto& profile : state.profiles) {
@@ -598,6 +637,105 @@ Json state_catalog_tools_json(GatewaydState& state) {
     profiles.push_back(Json{
         {"id", profile->spec.id},
         {"tools", std::move(tools)},
+    });
+  }
+  return Json{{"profiles", std::move(profiles)}};
+}
+
+Json state_catalog_resources_json(GatewaydState& state) {
+  Json profiles = Json::array();
+  for (const auto& profile : state.profiles) {
+    Json resources = Json::array();
+    if (!profile->runtime) {
+      profiles.push_back(Json{
+          {"id", profile->spec.id},
+          {"error",
+           Json{{"code", static_cast<int>(mcp::protocol::ErrorCode::InternalError)},
+                {"message", "profile runtime is not running"},
+                {"detail", ""},
+                {"category", "gatewayd.runtime"}}},
+      });
+      continue;
+    }
+    auto listed = profile->runtime->list_resources();
+    if (!listed) {
+      profiles.push_back(Json{
+          {"id", profile->spec.id},
+          {"error",
+           Json{{"code", listed.error().code},
+                {"message", listed.error().message},
+                {"detail", listed.error().detail},
+                {"category", listed.error().category}}},
+      });
+      continue;
+    }
+    for (const auto& resource : *listed) {
+      Json item{
+          {"uri", resource.uri},
+          {"name", resource.name},
+          {"title", resource.title},
+          {"description", resource.description},
+          {"mimeType", resource.mime_type},
+      };
+      if (resource.size.has_value()) {
+        item["size"] = *resource.size;
+      }
+      resources.push_back(std::move(item));
+    }
+    profiles.push_back(Json{
+        {"id", profile->spec.id},
+        {"resources", std::move(resources)},
+    });
+  }
+  return Json{{"profiles", std::move(profiles)}};
+}
+
+Json state_catalog_prompts_json(GatewaydState& state) {
+  Json profiles = Json::array();
+  for (const auto& profile : state.profiles) {
+    Json prompts = Json::array();
+    if (!profile->runtime) {
+      profiles.push_back(Json{
+          {"id", profile->spec.id},
+          {"error",
+           Json{{"code", static_cast<int>(mcp::protocol::ErrorCode::InternalError)},
+                {"message", "profile runtime is not running"},
+                {"detail", ""},
+                {"category", "gatewayd.runtime"}}},
+      });
+      continue;
+    }
+    auto listed = profile->runtime->list_prompts();
+    if (!listed) {
+      profiles.push_back(Json{
+          {"id", profile->spec.id},
+          {"error",
+           Json{{"code", listed.error().code},
+                {"message", listed.error().message},
+                {"detail", listed.error().detail},
+                {"category", listed.error().category}}},
+      });
+      continue;
+    }
+    for (const auto& prompt : *listed) {
+      Json arguments = Json::array();
+      for (const auto& argument : prompt.arguments) {
+        arguments.push_back(Json{
+            {"name", argument.name},
+            {"description", argument.description},
+            {"required", argument.required},
+        });
+      }
+      prompts.push_back(Json{
+          {"name", prompt.name},
+          {"title", prompt.title},
+          {"description", prompt.description},
+          {"arguments", std::move(arguments)},
+      });
+    }
+    profiles.push_back(Json{
+        {"id", profile->spec.id},
+        {"prompts", std::move(prompts)},
     });
   }
   return Json{{"profiles", std::move(profiles)}};
@@ -1305,14 +1443,29 @@ int run_admin_cli(std::vector<std::string_view> args) {
   Json arguments = Json::object();
   if (args[0] == "status") {
     tool = "gatewayd.health";
+  } else if (args[0] == "profiles") {
+    tool = "gatewayd.profiles";
   } else if (args[0] == "upstreams") {
     tool = "gatewayd.upstreams";
+  } else if (args[0] == "catalog" && args.size() == 2) {
+    if (args[1] == "tools") {
+      tool = "gatewayd.catalog.tools";
+    } else if (args[1] == "resources") {
+      tool = "gatewayd.catalog.resources";
+    } else if (args[1] == "prompts") {
+      tool = "gatewayd.catalog.prompts";
+    } else {
+      print_usage(std::cerr);
+      return 2;
+    }
   } else if (args[0] == "events") {
     tool = "gatewayd.events";
   } else if (args[0] == "diagnostics") {
     for (const auto& item :
          {std::pair<std::string_view, std::string_view>{"status",
                                                         "gatewayd.health"},
+          std::pair<std::string_view, std::string_view>{"profiles",
+                                                        "gatewayd.profiles"},
           std::pair<std::string_view, std::string_view>{"upstreams",
                                                         "gatewayd.upstreams"},
           std::pair<std::string_view, std::string_view>{"events",
@@ -1387,6 +1540,12 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
                 return ToolResult::text(state_health_json(*state).dump(2));
               })
           .tool<Json, ToolResult>(
+              "gatewayd.profiles",
+              [state](const Json&) {
+                std::lock_guard lock(state->mutex);
+                return ToolResult::text(state_profiles_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
               "gatewayd.upstreams",
               [state](const Json&) {
                 std::lock_guard lock(state->mutex);
@@ -1398,6 +1557,20 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
                 std::lock_guard lock(state->mutex);
                 return ToolResult::text(
                     state_catalog_tools_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.catalog.resources",
+              [state](const Json&) {
+                std::lock_guard lock(state->mutex);
+                return ToolResult::text(
+                    state_catalog_resources_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.catalog.prompts",
+              [state](const Json&) {
+                std::lock_guard lock(state->mutex);
+                return ToolResult::text(
+                    state_catalog_prompts_json(*state).dump(2));
               })
           .tool<Json, ToolResult>(
               "gatewayd.events",
@@ -1457,7 +1630,8 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  if (args[0] == "status" || args[0] == "upstreams" ||
+  if (args[0] == "status" || args[0] == "profiles" ||
+      args[0] == "upstreams" || args[0] == "catalog" ||
       args[0] == "events" || args[0] == "diagnostics" ||
       args[0] == "reload" ||
       args[0] == "upstream") {

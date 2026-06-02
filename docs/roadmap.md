@@ -91,3 +91,13 @@ Current status:
 
 The UI should remain a consumer of gatewayd admin APIs. UI lifecycle must not
 own the MCP data-plane lifecycle.
+
+Current status:
+
+- admin API-backed dashboard data is available through `gatewayd.health`,
+  `gatewayd.profiles`, `gatewayd.upstreams`, and `gatewayd.events`;
+- upstream enable/disable controls are available through
+  `gatewayd.upstream.enable` and `gatewayd.upstream.disable`;
+- catalog inspection is available through `gatewayd.catalog.tools`,
+  `gatewayd.catalog.resources`, and `gatewayd.catalog.prompts`;
+- a GUI/dashboard frontend remains future work.

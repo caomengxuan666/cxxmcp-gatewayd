@@ -78,7 +78,11 @@ pass `--bearer-token <token>` or set `CXXMCP_GATEWAYD_ADMIN_TOKEN`.
 
 ```powershell
 build\cxxmcp-gatewayd.exe status
+build\cxxmcp-gatewayd.exe profiles
 build\cxxmcp-gatewayd.exe upstreams
+build\cxxmcp-gatewayd.exe catalog tools
+build\cxxmcp-gatewayd.exe catalog resources
+build\cxxmcp-gatewayd.exe catalog prompts
 build\cxxmcp-gatewayd.exe events
 build\cxxmcp-gatewayd.exe diagnostics
 build\cxxmcp-gatewayd.exe reload
@@ -89,8 +93,11 @@ build\cxxmcp-gatewayd.exe upstream disable default filesystem
 ## Current Admin Tools
 
 - `gatewayd.health`
+- `gatewayd.profiles`
 - `gatewayd.upstreams`
 - `gatewayd.catalog.tools`
+- `gatewayd.catalog.resources`
+- `gatewayd.catalog.prompts`
 - `gatewayd.events`
 - `gatewayd.reload`
 - `gatewayd.upstream.enable`
