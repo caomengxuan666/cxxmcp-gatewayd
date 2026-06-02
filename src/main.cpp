@@ -640,6 +640,10 @@ std::string runtime_event_type(
       return "data.tool_called";
     case mcp::gateway::GatewayRuntimeEventKind::tool_denied:
       return "data.tool_denied";
+    case mcp::gateway::GatewayRuntimeEventKind::resource_denied:
+      return "data.resource_denied";
+    case mcp::gateway::GatewayRuntimeEventKind::prompt_denied:
+      return "data.prompt_denied";
   }
   return "runtime.unknown";
 }

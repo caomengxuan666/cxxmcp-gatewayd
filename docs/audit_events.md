@@ -41,10 +41,12 @@ Fields:
 - `data.tools_listed`
 - `data.tool_called`
 - `data.tool_denied`
+- `data.resource_denied`
+- `data.prompt_denied`
 
 ## Boundary
 
 These events cover daemon, admin/control-plane operations, and the current
-tool data-plane operations. Tool allow/deny policy is enforced by the
-`cxxmcp-gateway` data plane. Data-plane audit for resources, prompts,
-completions, and future policy families still requires additional runtime hooks.
+tool/resource/prompt data-plane policy operations. Allow/deny policy is enforced
+by the `cxxmcp-gateway` data plane. Broader durable audit storage remains out of
+scope for this daemon MVP.

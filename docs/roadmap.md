@@ -70,6 +70,8 @@ Current status:
   denies through the `cxxmcp-gateway` runtime observer;
 - data-plane exact-match tool allow/deny policy is enforced by the
   `cxxmcp-gateway` runtime for `tools/list` and `tools/call`;
+- exact-match resource and prompt allow/deny policy is enforced by the
+  `cxxmcp-gateway` runtime for concrete `resources` and `prompts` operations;
 - downstream static bearer auth is wired through the SDK auth provider for
   admin and profile MCP endpoints via `security.bearerTokens`;
 - fixed-window request admission is wired through the SDK rate limiter hook via
@@ -77,7 +79,7 @@ Current status:
 - upstream credential strings can use the `cxxmcp-gateway` `${ENV_NAME}`
   expansion path, and admin tools avoid returning configured headers or
   child-process environment maps;
-- non-tool policy families remain future work.
+- resource-template-specific and broader policy families remain future work.
 
 ## Phase 4: UI
 

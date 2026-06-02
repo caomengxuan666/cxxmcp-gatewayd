@@ -259,7 +259,9 @@ Profiles can use the `cxxmcp-gateway` data-plane tool policy:
       "id": "default",
       "policy": {
         "allowTools": ["workspace.workspace_scan"],
-        "denyTools": ["workspace.workspace_read_file"]
+        "denyTools": ["workspace.workspace_read_file"],
+        "allowResources": ["workspace.file:///safe/readme.md"],
+        "denyPrompts": ["workspace.secret_prompt"]
       },
       "upstreams": []
     }
@@ -268,5 +270,8 @@ Profiles can use the `cxxmcp-gateway` data-plane tool policy:
 ```
 
 `denyTools` wins over `allowTools`. When `allowTools` is non-empty, only listed
-exposed tool names are visible and callable. The policy applies to `tools/list`
-and `tools/call`.
+exposed tool names are visible and callable. Resource and prompt policy uses the
+same exact-match shape through `allowResources` / `denyResources` and
+`allowPrompts` / `denyPrompts`. Tool policy applies to `tools/list` and
+`tools/call`; resource/prompt policy applies to concrete `resources` and
+`prompts` operations.
