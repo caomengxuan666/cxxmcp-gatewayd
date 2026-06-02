@@ -35,11 +35,16 @@ Fields:
 - `upstream.disabled`
 - `upstream.enable.failed`
 - `upstream.disable.failed`
+- `runtime.upstream_status_changed`
+- `runtime.stopping`
+- `runtime.stopped`
+- `data.tools_listed`
+- `data.tool_called`
+- `data.tool_denied`
 
 ## Boundary
 
-These events cover daemon and admin/control-plane operations. Tool allow/deny
-policy is enforced by the `cxxmcp-gateway` data plane, but data-plane audit
-events for downstream MCP `tools/list`, `tools/call`, resources, prompts,
-completions, and policy decisions still require an explicit runtime audit hook.
-They should not be simulated in `gatewayd` without actual routing evidence.
+These events cover daemon, admin/control-plane operations, and the current
+tool data-plane operations. Tool allow/deny policy is enforced by the
+`cxxmcp-gateway` data plane. Data-plane audit for resources, prompts,
+completions, and future policy families still requires additional runtime hooks.

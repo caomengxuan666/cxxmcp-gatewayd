@@ -63,7 +63,8 @@ struct GatewaydState {
   AdminEndpoint admin;
   std::string config_path;
   std::uint64_t next_event_id = 1;
-  mutable std::mutex mutex;
+  std::weak_ptr<GatewaydState> self;
+  mutable std::recursive_mutex mutex;
   std::vector<std::shared_ptr<ProfileRuntime>> profiles;
   std::vector<Json> events;
 };
@@ -356,7 +357,59 @@ Json usage_error_json(std::string message, std::string detail = {}) {
        Json{{"code", static_cast<int>(mcp::protocol::ErrorCode::InvalidParams)},
             {"message", std::move(message)},
             {"detail", std::move(detail)},
-            {"category", "gatewayd.admin"}}},
+      {"category", "gatewayd.admin"}}},
+  };
+}
+
+std::string runtime_event_type(
+    mcp::gateway::GatewayRuntimeEventKind kind) {
+  switch (kind) {
+    case mcp::gateway::GatewayRuntimeEventKind::upstream_status_changed:
+      return "runtime.upstream_status_changed";
+    case mcp::gateway::GatewayRuntimeEventKind::runtime_stopping:
+      return "runtime.stopping";
+    case mcp::gateway::GatewayRuntimeEventKind::runtime_stopped:
+      return "runtime.stopped";
+    case mcp::gateway::GatewayRuntimeEventKind::tools_listed:
+      return "data.tools_listed";
+    case mcp::gateway::GatewayRuntimeEventKind::tool_called:
+      return "data.tool_called";
+    case mcp::gateway::GatewayRuntimeEventKind::tool_denied:
+      return "data.tool_denied";
+  }
+  return "runtime.unknown";
+}
+
+mcp::gateway::GatewayRuntimeObserver make_runtime_observer(
+    std::weak_ptr<GatewaydState> weak_state,
+    std::string profile_id) {
+  return [weak_state = std::move(weak_state),
+          profile_id = std::move(profile_id)](
+             const mcp::gateway::GatewayRuntimeEvent& event) {
+    auto state = weak_state.lock();
+    if (!state) {
+      return;
+    }
+
+    Json detail{{"profile", profile_id}};
+    if (!event.upstream_id.empty()) {
+      detail["upstream"] = event.upstream_id;
+    }
+    if (!event.method.empty()) {
+      detail["method"] = event.method;
+    }
+    if (!event.exposed_name.empty()) {
+      detail["exposedName"] = event.exposed_name;
+    }
+    if (event.item_count != 0) {
+      detail["itemCount"] = event.item_count;
+    }
+    if (event.error.has_value()) {
+      detail["error"] = error_json(*event.error)["error"];
+    }
+
+    std::lock_guard lock(state->mutex);
+    record_event(*state, runtime_event_type(event.kind), std::move(detail));
   };
 }
 
@@ -371,9 +424,12 @@ std::shared_ptr<ProfileRuntime> find_profile(GatewaydState& state,
 }
 
 mcp::core::Result<std::shared_ptr<ProfileRuntime>> start_profile(
-    ProfileSpec spec) {
+    ProfileSpec spec,
+    std::weak_ptr<GatewaydState> state = {}) {
+  auto observer = make_runtime_observer(state, spec.id);
   auto runtime_options =
-      mcp::gateway::make_gateway_runtime_options(spec.runtime_config);
+      mcp::gateway::make_gateway_runtime_options(spec.runtime_config,
+                                                 std::move(observer));
   if (!runtime_options) {
     return mcp::core::unexpected(runtime_options.error());
   }
@@ -397,10 +453,11 @@ mcp::core::Result<std::shared_ptr<ProfileRuntime>> start_profile(
 }
 
 mcp::core::Result<std::vector<std::shared_ptr<ProfileRuntime>>> start_profiles(
-    std::vector<ProfileSpec> specs) {
+    std::vector<ProfileSpec> specs,
+    std::weak_ptr<GatewaydState> state = {}) {
   std::vector<std::shared_ptr<ProfileRuntime>> profiles;
   for (auto& spec : specs) {
-    auto profile = start_profile(std::move(spec));
+    auto profile = start_profile(std::move(spec), state);
     if (!profile) {
       for (auto& started : profiles) {
         if (started->runtime) {
@@ -424,13 +481,15 @@ void stop_profiles(
   }
 }
 
-mcp::core::Result<mcp::core::Unit> restart_profile(ProfileRuntime& profile) {
+mcp::core::Result<mcp::core::Unit> restart_profile(
+    ProfileRuntime& profile,
+    std::weak_ptr<GatewaydState> state = {}) {
   if (profile.runtime) {
     (void)profile.runtime->stop();
     profile.runtime.reset();
   }
 
-  auto restarted = start_profile(profile.spec);
+  auto restarted = start_profile(profile.spec, state);
   if (!restarted) {
     return mcp::core::unexpected(restarted.error());
   }
@@ -453,7 +512,7 @@ Json restart_profile_json(GatewaydState& state, const Json& args) {
     return usage_error_json("unknown profile", profile_arg->get<std::string>());
   }
 
-  auto restarted = restart_profile(*profile);
+  auto restarted = restart_profile(*profile, state.self);
   if (!restarted) {
     record_event(state, "profile.restart.failed",
                  Json{{"profile", profile->spec.id},
@@ -780,11 +839,11 @@ Json reload_config_json(GatewaydState& state, const Json&) {
   auto previous = std::move(state.profiles);
   stop_profiles(previous);
 
-  auto started = start_profiles(std::move(loaded->second));
+  auto started = start_profiles(std::move(loaded->second), state.self);
   if (!started) {
     for (const auto& profile : previous) {
       if (profile) {
-        (void)restart_profile(*profile);
+        (void)restart_profile(*profile, state.self);
       }
     }
     state.profiles = std::move(previous);
@@ -1079,10 +1138,11 @@ int main(int argc, char** argv) {
   }
 
   auto state = std::make_shared<GatewaydState>();
+  state->self = state;
   state->admin = std::move(loaded->first);
   state->config_path = config_path;
 
-  auto profiles = start_profiles(std::move(loaded->second));
+  auto profiles = start_profiles(std::move(loaded->second), state->self);
   if (!profiles) {
     std::cerr << "failed to start profiles: " << profiles.error().message;
     if (!profiles.error().detail.empty()) {
