@@ -1,0 +1,33 @@
+{
+  "admin": {
+    "host": "127.0.0.1",
+    "port": 39932,
+    "path": "/admin"
+  },
+  "profiles": [
+    {
+      "id": "default",
+      "endpoint": {
+        "host": "127.0.0.1",
+        "port": 39931,
+        "path": "/mcp/default"
+      },
+      "runtime": {
+        "upstreamSessionMode": "persistent",
+        "persistentSessionPoolSize": 1
+      },
+      "upstreams": [
+        {
+          "id": "filesystem",
+          "enabled": false,
+          "transport": "stdio"
+        },
+        {
+          "id": "tools",
+          "enabled": false,
+          "transport": "http"
+        }
+      ]
+    }
+  ]
+}
