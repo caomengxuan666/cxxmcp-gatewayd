@@ -162,6 +162,15 @@ std::optional<std::string> discover_config_path() {
   return std::nullopt;
 }
 
+std::optional<std::string> resolve_environment(std::string_view name) {
+  const auto key = std::string(name);
+  const char* value = std::getenv(key.c_str());
+  if (value == nullptr) {
+    return std::nullopt;
+  }
+  return std::string(value);
+}
+
 std::int64_t unix_time_ms() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              std::chrono::system_clock::now().time_since_epoch())
@@ -408,14 +417,14 @@ mcp::core::Result<SecurityConfig> parse_security_config(const Json& root) {
             "gatewayd.config"});
       }
       const auto env_name = env->get<std::string>();
-      const char* env_value = std::getenv(env_name.c_str());
-      if (env_value == nullptr || *env_value == '\0') {
+      auto env_value = resolve_environment(env_name);
+      if (!env_value.has_value() || env_value->empty()) {
         return mcp::core::unexpected(mcp::core::Error{
             static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
             "security bearer tokenEnv is not set", env_name,
             "gatewayd.config"});
       }
-      token = std::string(env_value);
+      token = std::move(*env_value);
     }
     if (!token.has_value() || token->empty()) {
       return mcp::core::unexpected(mcp::core::Error{
@@ -1063,7 +1072,10 @@ mcp::core::Result<LoadedGatewaydConfig> load_gatewayd_config(
           "gatewayd.config"});
     }
 
-    auto document = mcp::gateway::gateway_config_document_from_json(item);
+    mcp::gateway::GatewayConfigLoadOptions gateway_load_options;
+    gateway_load_options.environment = resolve_environment;
+    auto document = mcp::gateway::gateway_config_document_from_json(
+        item, gateway_load_options);
     if (!document) {
       return mcp::core::unexpected(document.error());
     }

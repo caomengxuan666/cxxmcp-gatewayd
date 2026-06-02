@@ -74,7 +74,10 @@ Current status:
   admin and profile MCP endpoints via `security.bearerTokens`;
 - fixed-window request admission is wired through the SDK rate limiter hook via
   `security.rateLimit`;
-- credential handling and non-tool policy families remain future work.
+- upstream credential strings can use the `cxxmcp-gateway` `${ENV_NAME}`
+  expansion path, and admin tools avoid returning configured headers or
+  child-process environment maps;
+- non-tool policy families remain future work.
 
 ## Phase 4: UI
 

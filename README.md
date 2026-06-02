@@ -194,6 +194,35 @@ This uses the SDK `RateLimiter` hook. It is intentionally small: the window is
 process-wide for the current daemon process and is not a per-user or
 distributed quota store.
 
+Profile upstream strings support the `cxxmcp-gateway` `${ENV_NAME}` expansion
+rules. Use this for upstream credentials such as HTTP authorization headers or
+stdio child-process environment values:
+
+```json
+{
+  "profiles": [
+    {
+      "id": "default",
+      "upstreams": [
+        {
+          "id": "remote-tools",
+          "enabled": true,
+          "transport": "http",
+          "uri": "https://example.invalid/mcp",
+          "headers": {
+            "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Missing environment variables fail config validation. Admin tools report
+upstream ids, enabled state, transport kind, runtime status, and errors, but do
+not return configured headers or child-process environment maps.
+
 ## Packaging
 
 The build installs the daemon, sample config, docs, and service templates.
