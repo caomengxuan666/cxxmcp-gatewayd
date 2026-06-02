@@ -90,8 +90,9 @@ build\cxxmcp-gatewayd.exe diagnostics
 build\cxxmcp-gatewayd.exe reload
 build\cxxmcp-gatewayd.exe upstream enable default filesystem
 build\cxxmcp-gatewayd.exe upstream disable default filesystem
+build\cxxmcp-gatewayd.exe profile restart default
 build\cxxmcp-gatewayd.exe profile runtime set default `
-  --session-mode persistent --pool-size 2 --prewarm true
+  --session-mode persistent --pool-size 2 --prewarm true --restart
 ```
 
 ## Current Admin Tools
@@ -112,9 +113,11 @@ build\cxxmcp-gatewayd.exe profile runtime set default `
 `gatewayd.upstream.enable` and `gatewayd.upstream.disable` update the loaded
 config file and the in-memory desired config for one profile, then return
 `runtimeRestartRequired: true`. `gatewayd.profile.restart` applies the desired
-config by restarting that profile's MCP endpoint. `gatewayd.reload` reloads the
-config file and hot-replaces profile runtimes after validation. Admin endpoint
-host, port, or path changes require restarting the daemon.
+config by restarting that profile's MCP endpoint. The CLI exposes this as
+`profile restart <profile>`, and `profile runtime set <profile> --restart`
+persists runtime settings then applies them in one command. `gatewayd.reload`
+reloads the config file and hot-replaces profile runtimes after validation.
+Admin endpoint host, port, or path changes require restarting the daemon.
 
 Example admin tool arguments:
 

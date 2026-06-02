@@ -97,7 +97,8 @@ Current status:
 - admin API-backed dashboard data is available through `gatewayd.health`,
   `gatewayd.profiles`, `gatewayd.upstreams`, and `gatewayd.events`;
 - profile runtime editing is available through
-  `gatewayd.profile.runtime.set`;
+  `gatewayd.profile.runtime.set`, and the CLI can apply those edits
+  immediately with `profile runtime set <profile> --restart`;
 - upstream enable/disable controls are available through
   `gatewayd.upstream.enable` and `gatewayd.upstream.disable`;
 - catalog inspection is available through `gatewayd.catalog.tools`,
@@ -106,4 +107,7 @@ Current status:
   `cxxmcp-gatewayd dashboard`;
 - a static graphical dashboard snapshot can be generated with
   `cxxmcp-gatewayd dashboard --html <file>`;
-- a live graphical dashboard remains future work.
+- the daemon MVP intentionally stops at CLI and static dashboard consumers of
+  the admin API. A live graphical dashboard remains future work because it
+  should be built on a deliberate browser-facing control-plane surface rather
+  than hidden inside the MCP data-plane transport.

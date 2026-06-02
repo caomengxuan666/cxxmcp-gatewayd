@@ -112,9 +112,11 @@ void print_usage(std::ostream& out) {
          "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd upstream disable <profile> <upstream> "
          "[--admin-url <url>] [--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd profile restart <profile> "
+         "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd profile runtime set <profile> "
          "[--session-mode <per-call|persistent>] [--pool-size <n>] "
-         "[--prewarm <true|false>] [--admin-url <url>] "
+         "[--prewarm <true|false>] [--restart] [--admin-url <url>] "
          "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd --config <file>   # legacy alias for run\n\n"
       << "Config discovery without --config:\n"
@@ -1945,6 +1947,7 @@ int run_admin_cli(std::vector<std::string_view> args) {
 
   std::string tool;
   Json arguments = Json::object();
+  std::optional<std::string> restart_profile_after_success;
   if (args[0] == "status") {
     tool = "gatewayd.health";
   } else if (args[0] == "profiles") {
@@ -1997,11 +2000,20 @@ int run_admin_cli(std::vector<std::string_view> args) {
         {"profile", std::string(args[2])},
         {"upstream", std::string(args[3])},
     };
+  } else if (args[0] == "profile" && args.size() == 3 &&
+             args[1] == "restart") {
+    tool = "gatewayd.profile.restart";
+    arguments = Json{{"profile", std::string(args[2])}};
   } else if (args[0] == "profile" && args.size() >= 4 &&
              args[1] == "runtime" && args[2] == "set") {
     tool = "gatewayd.profile.runtime.set";
     arguments = Json{{"profile", std::string(args[3])}};
     for (std::size_t i = 4; i < args.size();) {
+      if (args[i] == "--restart") {
+        restart_profile_after_success = std::string(args[3]);
+        ++i;
+        continue;
+      }
       if (i + 1 >= args.size()) {
         print_usage(std::cerr);
         return 2;
@@ -2047,8 +2059,8 @@ int run_admin_cli(std::vector<std::string_view> args) {
     return 2;
   }
 
-  auto result = call_admin_tool(std::move(admin_url), std::move(bearer_token),
-                                tool, std::move(arguments));
+  auto result = call_admin_tool(admin_url, bearer_token, tool,
+                                std::move(arguments));
   if (!result) {
     std::cerr << "admin command failed: " << result.error().message;
     if (!result.error().detail.empty()) {
@@ -2058,7 +2070,26 @@ int run_admin_cli(std::vector<std::string_view> args) {
     return 1;
   }
   print_tool_result(*result);
-  return result->is_error_result() ? 1 : 0;
+  if (result->is_error_result()) {
+    return 1;
+  }
+  if (restart_profile_after_success.has_value()) {
+    auto restarted =
+        call_admin_tool(std::move(admin_url), std::move(bearer_token),
+                        "gatewayd.profile.restart",
+                        Json{{"profile", *restart_profile_after_success}});
+    if (!restarted) {
+      std::cerr << "admin command failed: " << restarted.error().message;
+      if (!restarted.error().detail.empty()) {
+        std::cerr << ": " << restarted.error().detail;
+      }
+      std::cerr << "\n";
+      return 1;
+    }
+    print_tool_result(*restarted);
+    return restarted->is_error_result() ? 1 : 0;
+  }
+  return 0;
 }
 
 mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
