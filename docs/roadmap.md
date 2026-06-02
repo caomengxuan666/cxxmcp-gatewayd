@@ -102,4 +102,6 @@ Current status:
   `gatewayd.catalog.resources`, and `gatewayd.catalog.prompts`;
 - a minimal admin API-backed CLI dashboard is available through
   `cxxmcp-gatewayd dashboard`;
-- a graphical dashboard frontend remains future work.
+- a static graphical dashboard snapshot can be generated with
+  `cxxmcp-gatewayd dashboard --html <file>`;
+- a live graphical dashboard remains future work.

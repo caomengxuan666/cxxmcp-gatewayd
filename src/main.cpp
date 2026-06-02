@@ -100,6 +100,8 @@ void print_usage(std::ostream& out) {
          "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd dashboard [--admin-url <url>] "
          "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd dashboard --html <file> [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd events [--admin-url <url>] "
          "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd diagnostics [--admin-url <url>] "
@@ -1436,6 +1438,62 @@ std::size_t array_size_at(const Json& json, std::string_view key) {
   return it != json.end() && it->is_array() ? it->size() : 0;
 }
 
+struct DashboardData {
+  Json health;
+  Json profiles;
+  Json upstreams;
+  Json tools;
+  Json resources;
+  Json prompts;
+  Json events;
+};
+
+mcp::core::Result<DashboardData> load_dashboard_data(
+    const std::string& admin_url,
+    const std::optional<std::string>& bearer_token) {
+  DashboardData data;
+  const auto load = [&](std::string_view tool) -> mcp::core::Result<Json> {
+    return call_admin_json(admin_url, bearer_token, tool);
+  };
+
+  auto health = load("gatewayd.health");
+  if (!health) {
+    return mcp::core::unexpected(health.error());
+  }
+  data.health = std::move(*health);
+  auto profiles = load("gatewayd.profiles");
+  if (!profiles) {
+    return mcp::core::unexpected(profiles.error());
+  }
+  data.profiles = std::move(*profiles);
+  auto upstreams = load("gatewayd.upstreams");
+  if (!upstreams) {
+    return mcp::core::unexpected(upstreams.error());
+  }
+  data.upstreams = std::move(*upstreams);
+  auto tools = load("gatewayd.catalog.tools");
+  if (!tools) {
+    return mcp::core::unexpected(tools.error());
+  }
+  data.tools = std::move(*tools);
+  auto resources = load("gatewayd.catalog.resources");
+  if (!resources) {
+    return mcp::core::unexpected(resources.error());
+  }
+  data.resources = std::move(*resources);
+  auto prompts = load("gatewayd.catalog.prompts");
+  if (!prompts) {
+    return mcp::core::unexpected(prompts.error());
+  }
+  data.prompts = std::move(*prompts);
+  auto events = load("gatewayd.events");
+  if (!events) {
+    return mcp::core::unexpected(events.error());
+  }
+  data.events = std::move(*events);
+  return data;
+}
+
 void print_dashboard_count_line(const Json& catalog,
                                 std::string_view field) {
   const auto profiles = catalog.find("profiles");
@@ -1456,41 +1514,23 @@ void print_dashboard_count_line(const Json& catalog,
 
 int run_dashboard_cli(const std::string& admin_url,
                       const std::optional<std::string>& bearer_token) {
-  const auto health =
-      call_admin_json(admin_url, bearer_token, "gatewayd.health");
-  const auto profiles =
-      call_admin_json(admin_url, bearer_token, "gatewayd.profiles");
-  const auto upstreams =
-      call_admin_json(admin_url, bearer_token, "gatewayd.upstreams");
-  const auto tools =
-      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.tools");
-  const auto resources =
-      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.resources");
-  const auto prompts =
-      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.prompts");
-  const auto events =
-      call_admin_json(admin_url, bearer_token, "gatewayd.events");
-
-  for (const auto* item :
-       {&health, &profiles, &upstreams, &tools, &resources, &prompts,
-        &events}) {
-    if (!*item) {
-      std::cerr << "dashboard failed: " << item->error().message;
-      if (!item->error().detail.empty()) {
-        std::cerr << ": " << item->error().detail;
-      }
-      std::cerr << "\n";
-      return 1;
+  const auto data = load_dashboard_data(admin_url, bearer_token);
+  if (!data) {
+    std::cerr << "dashboard failed: " << data.error().message;
+    if (!data.error().detail.empty()) {
+      std::cerr << ": " << data.error().detail;
     }
+    std::cerr << "\n";
+    return 1;
   }
 
   std::cout << "cxxmcp-gatewayd dashboard\n";
-  std::cout << "status: " << health->value("status", "unknown") << "\n";
-  std::cout << "admin: " << health->value("adminUrl", admin_url) << "\n";
-  std::cout << "config: " << health->value("configPath", "") << "\n\n";
+  std::cout << "status: " << data->health.value("status", "unknown") << "\n";
+  std::cout << "admin: " << data->health.value("adminUrl", admin_url) << "\n";
+  std::cout << "config: " << data->health.value("configPath", "") << "\n\n";
 
   std::cout << "profiles\n";
-  for (const auto& profile : profiles->value("profiles", Json::array())) {
+  for (const auto& profile : data->profiles.value("profiles", Json::array())) {
     const auto endpoint = profile.value("endpoint", Json::object());
     std::cout << "  " << profile.value("id", "") << "  "
               << endpoint.value("url", "") << "  upstreams="
@@ -1498,7 +1538,7 @@ int run_dashboard_cli(const std::string& admin_url,
   }
 
   std::cout << "\nupstreams\n";
-  for (const auto& profile : upstreams->value("profiles", Json::array())) {
+  for (const auto& profile : data->upstreams.value("profiles", Json::array())) {
     std::cout << "  [" << profile.value("id", "") << "]\n";
     for (const auto& upstream : profile.value("configured", Json::array())) {
       std::cout << "    " << upstream.value("id", "")
@@ -1509,18 +1549,179 @@ int run_dashboard_cli(const std::string& admin_url,
   }
 
   std::cout << "\ncatalog\n";
-  print_dashboard_count_line(*tools, "tools");
-  print_dashboard_count_line(*resources, "resources");
-  print_dashboard_count_line(*prompts, "prompts");
+  print_dashboard_count_line(data->tools, "tools");
+  print_dashboard_count_line(data->resources, "resources");
+  print_dashboard_count_line(data->prompts, "prompts");
 
   std::cout << "\nrecent events\n";
-  const auto event_items = events->value("events", Json::array());
+  const auto event_items = data->events.value("events", Json::array());
   const auto start = event_items.size() > 8 ? event_items.size() - 8 : 0;
   for (std::size_t i = start; i < event_items.size(); ++i) {
     const auto& event = event_items[i];
     std::cout << "  #" << event.value("id", 0) << " "
               << event.value("type", "") << "\n";
   }
+  return 0;
+}
+
+std::string html_escape(std::string_view value) {
+  std::string escaped;
+  escaped.reserve(value.size());
+  for (char ch : value) {
+    switch (ch) {
+      case '&':
+        escaped += "&amp;";
+        break;
+      case '<':
+        escaped += "&lt;";
+        break;
+      case '>':
+        escaped += "&gt;";
+        break;
+      case '"':
+        escaped += "&quot;";
+        break;
+      case '\'':
+        escaped += "&#39;";
+        break;
+      default:
+        escaped.push_back(ch);
+        break;
+    }
+  }
+  return escaped;
+}
+
+void append_catalog_rows(std::string& html,
+                         const Json& catalog,
+                         std::string_view field) {
+  for (const auto& profile : catalog.value("profiles", Json::array())) {
+    html += "<tr><td>";
+    html += html_escape(profile.value("id", ""));
+    html += "</td><td>";
+    html += html_escape(field);
+    html += "</td><td>";
+    if (profile.contains("error")) {
+      html += "error: ";
+      html += html_escape(profile["error"].value("message", "unknown"));
+    } else {
+      html += std::to_string(array_size_at(profile, field));
+    }
+    html += "</td></tr>\n";
+  }
+}
+
+std::string render_dashboard_html(const DashboardData& data,
+                                  const std::string& admin_url) {
+  std::string html;
+  html += "<!doctype html><html><head><meta charset=\"utf-8\">";
+  html += "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">";
+  html += "<title>cxxmcp-gatewayd dashboard</title>";
+  html += "<style>";
+  html += "body{margin:0;font:14px system-ui,Segoe UI,sans-serif;color:#18202a;background:#f6f7f9}";
+  html += "header{background:#17202a;color:white;padding:18px 24px}";
+  html += "main{max-width:1180px;margin:0 auto;padding:20px 24px}";
+  html += "section{background:white;border:1px solid #d8dde5;border-radius:8px;margin:0 0 16px;padding:16px}";
+  html += "h1{font-size:22px;margin:0 0 6px}h2{font-size:16px;margin:0 0 12px}";
+  html += ".meta{color:#d7dee8}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}";
+  html += ".metric{border:1px solid #e1e5eb;border-radius:8px;padding:12px;background:#fbfcfd}";
+  html += ".metric b{display:block;font-size:20px;margin-top:4px}";
+  html += "table{width:100%;border-collapse:collapse}th,td{text-align:left;border-bottom:1px solid #edf0f4;padding:8px}";
+  html += "th{font-size:12px;text-transform:uppercase;color:#536173;background:#fafbfc}";
+  html += "code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}";
+  html += "</style></head><body>";
+  html += "<header><h1>cxxmcp-gatewayd dashboard</h1><div class=\"meta\">";
+  html += html_escape(data.health.value("adminUrl", admin_url));
+  html += "</div><div class=\"meta\">";
+  html += html_escape(data.health.value("configPath", ""));
+  html += "</div></header><main>";
+
+  const auto profile_count = array_size_at(data.profiles, "profiles");
+  std::size_t upstream_count = 0;
+  for (const auto& profile : data.profiles.value("profiles", Json::array())) {
+    upstream_count += array_size_at(profile, "upstreams");
+  }
+  html += "<section><h2>Summary</h2><div class=\"grid\">";
+  html += "<div class=\"metric\">Status<b>";
+  html += html_escape(data.health.value("status", "unknown"));
+  html += "</b></div><div class=\"metric\">Profiles<b>";
+  html += std::to_string(profile_count);
+  html += "</b></div><div class=\"metric\">Configured upstreams<b>";
+  html += std::to_string(upstream_count);
+  html += "</b></div></div></section>";
+
+  html += "<section><h2>Profiles</h2><table><tr><th>Profile</th><th>Endpoint</th><th>Upstreams</th></tr>";
+  for (const auto& profile : data.profiles.value("profiles", Json::array())) {
+    const auto endpoint = profile.value("endpoint", Json::object());
+    html += "<tr><td>";
+    html += html_escape(profile.value("id", ""));
+    html += "</td><td><code>";
+    html += html_escape(endpoint.value("url", ""));
+    html += "</code></td><td>";
+    html += std::to_string(array_size_at(profile, "upstreams"));
+    html += "</td></tr>\n";
+  }
+  html += "</table></section>";
+
+  html += "<section><h2>Upstreams</h2><table><tr><th>Profile</th><th>Upstream</th><th>Enabled</th><th>Transport</th></tr>";
+  for (const auto& profile : data.upstreams.value("profiles", Json::array())) {
+    const auto profile_id = profile.value("id", "");
+    for (const auto& upstream : profile.value("configured", Json::array())) {
+      html += "<tr><td>";
+      html += html_escape(profile_id);
+      html += "</td><td>";
+      html += html_escape(upstream.value("id", ""));
+      html += "</td><td>";
+      html += upstream.value("enabled", false) ? "true" : "false";
+      html += "</td><td>";
+      html += html_escape(upstream.value("transport", ""));
+      html += "</td></tr>\n";
+    }
+  }
+  html += "</table></section>";
+
+  html += "<section><h2>Catalog</h2><table><tr><th>Profile</th><th>Kind</th><th>Count</th></tr>";
+  append_catalog_rows(html, data.tools, "tools");
+  append_catalog_rows(html, data.resources, "resources");
+  append_catalog_rows(html, data.prompts, "prompts");
+  html += "</table></section>";
+
+  html += "<section><h2>Recent Events</h2><table><tr><th>ID</th><th>Time</th><th>Type</th></tr>";
+  const auto event_items = data.events.value("events", Json::array());
+  const auto start = event_items.size() > 20 ? event_items.size() - 20 : 0;
+  for (std::size_t i = start; i < event_items.size(); ++i) {
+    const auto& event = event_items[i];
+    html += "<tr><td>";
+    html += std::to_string(event.value("id", 0));
+    html += "</td><td>";
+    html += std::to_string(event.value("unixMs", 0));
+    html += "</td><td>";
+    html += html_escape(event.value("type", ""));
+    html += "</td></tr>\n";
+  }
+  html += "</table></section></main></body></html>\n";
+  return html;
+}
+
+int run_dashboard_html_cli(const std::string& admin_url,
+                           const std::optional<std::string>& bearer_token,
+                           const std::string& output_path) {
+  const auto data = load_dashboard_data(admin_url, bearer_token);
+  if (!data) {
+    std::cerr << "dashboard html failed: " << data.error().message;
+    if (!data.error().detail.empty()) {
+      std::cerr << ": " << data.error().detail;
+    }
+    std::cerr << "\n";
+    return 1;
+  }
+  try {
+    write_text_file(output_path, render_dashboard_html(*data, admin_url));
+  } catch (const std::exception& ex) {
+    std::cerr << "dashboard html failed: " << ex.what() << "\n";
+    return 1;
+  }
+  std::cout << "dashboard html written to " << output_path << "\n";
   return 0;
 }
 
@@ -1575,6 +1776,10 @@ int run_admin_cli(std::vector<std::string_view> args) {
   }
   if (args[0] == "dashboard" && args.size() == 1) {
     return run_dashboard_cli(admin_url, bearer_token);
+  }
+  if (args[0] == "dashboard" && args.size() == 3 && args[1] == "--html") {
+    return run_dashboard_html_cli(admin_url, bearer_token,
+                                  std::string(args[2]));
   }
 
   std::string tool;
