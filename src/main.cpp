@@ -19,6 +19,7 @@
 #include <utility>
 #include <vector>
 
+#include "cxxmcp/client.hpp"
 #include "cxxmcp/gateway/config_io.hpp"
 #include "cxxmcp/gateway/runtime.hpp"
 #include "cxxmcp/peer.hpp"
@@ -73,6 +74,14 @@ void print_usage(std::ostream& out) {
       << "  cxxmcp-gatewayd --version\n"
       << "  cxxmcp-gatewayd validate [--config <file>]\n"
       << "  cxxmcp-gatewayd run [--config <file>]\n"
+      << "  cxxmcp-gatewayd status [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd upstreams [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd events [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd reload [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd upstream enable <profile> <upstream> "
+         "[--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd upstream disable <profile> <upstream> "
+         "[--admin-url <url>]\n"
       << "  cxxmcp-gatewayd --config <file>   # legacy alias for run\n\n"
       << "Config discovery without --config:\n"
       << "  1. CXXMCP_GATEWAYD_CONFIG\n"
@@ -757,6 +766,125 @@ Json reload_config_json(GatewaydState& state, const Json&) {
   };
 }
 
+std::string default_admin_url() {
+  if (const char* env = std::getenv("CXXMCP_GATEWAYD_ADMIN_URL");
+      env != nullptr && *env != '\0') {
+    return std::string(env);
+  }
+  return "http://127.0.0.1:39932/admin";
+}
+
+mcp::core::Result<ToolResult> call_admin_tool(
+    std::string admin_url,
+    std::string_view tool_name,
+    Json arguments = Json::object()) {
+  mcp::client::Client::StreamableHttpEndpoint endpoint;
+  endpoint.uri = std::move(admin_url);
+
+  auto running = mcp::serve(
+      mcp::ClientPeer::connect_streamable_http(std::move(endpoint)));
+  if (!running) {
+    return mcp::core::unexpected(running.error());
+  }
+
+  auto initialized =
+      running->peer().initialize("cxxmcp-gatewayd-cli", CXXMCP_GATEWAYD_VERSION);
+  if (!initialized) {
+    (void)running->stop();
+    return mcp::core::unexpected(initialized.error());
+  }
+  auto notified = running->peer().notify_initialized();
+  if (!notified) {
+    (void)running->stop();
+    return mcp::core::unexpected(notified.error());
+  }
+
+  auto result = running->peer().call_tool(std::string(tool_name),
+                                          std::move(arguments));
+  (void)running->stop();
+  return result;
+}
+
+void print_tool_result(const ToolResult& result) {
+  bool printed = false;
+  for (const auto& block : result.content) {
+    if (block.type == "text") {
+      std::cout << block.text;
+      if (!block.text.empty() && block.text.back() != '\n') {
+        std::cout << '\n';
+      }
+      printed = true;
+    }
+  }
+  if (!printed && result.structured_content.has_value()) {
+    std::cout << result.structured_content->dump(2) << '\n';
+  }
+}
+
+bool parse_admin_url(std::vector<std::string_view>& args,
+                     std::string& admin_url) {
+  for (std::size_t i = 0; i < args.size();) {
+    if (args[i] != "--admin-url") {
+      ++i;
+      continue;
+    }
+    if (i + 1 >= args.size()) {
+      return false;
+    }
+    admin_url = std::string(args[i + 1]);
+    args.erase(args.begin() + static_cast<std::ptrdiff_t>(i),
+               args.begin() + static_cast<std::ptrdiff_t>(i + 2));
+  }
+  return true;
+}
+
+int run_admin_cli(std::vector<std::string_view> args) {
+  std::string admin_url = default_admin_url();
+  if (!parse_admin_url(args, admin_url)) {
+    std::cerr << "--admin-url requires a value\n";
+    return 2;
+  }
+  if (args.empty()) {
+    print_usage(std::cerr);
+    return 2;
+  }
+
+  std::string tool;
+  Json arguments = Json::object();
+  if (args[0] == "status") {
+    tool = "gatewayd.health";
+  } else if (args[0] == "upstreams") {
+    tool = "gatewayd.upstreams";
+  } else if (args[0] == "events") {
+    tool = "gatewayd.events";
+  } else if (args[0] == "reload") {
+    tool = "gatewayd.reload";
+  } else if (args[0] == "upstream" && args.size() == 4 &&
+             (args[1] == "enable" || args[1] == "disable")) {
+    tool = args[1] == "enable" ? "gatewayd.upstream.enable"
+                               : "gatewayd.upstream.disable";
+    arguments = Json{
+        {"profile", std::string(args[2])},
+        {"upstream", std::string(args[3])},
+    };
+  } else {
+    print_usage(std::cerr);
+    return 2;
+  }
+
+  auto result = call_admin_tool(std::move(admin_url), tool, std::move(arguments));
+  if (!result) {
+    std::cerr << "admin command failed: " << result.error().message;
+    if (!result.error().detail.empty()) {
+      std::cerr << ": " << result.error().detail;
+    }
+    std::cerr << "\n";
+    return 1;
+  }
+  print_tool_result(*result);
+  return result->is_error_result() ? 1 : 0;
+}
+
 mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
     const std::shared_ptr<GatewaydState>& state) {
   auto peer =
@@ -840,6 +968,12 @@ int main(int argc, char** argv) {
   if (args[0] == "--version") {
     std::cout << "cxxmcp-gatewayd " << CXXMCP_GATEWAYD_VERSION << "\n";
     return 0;
+  }
+
+  if (args[0] == "status" || args[0] == "upstreams" ||
+      args[0] == "events" || args[0] == "reload" ||
+      args[0] == "upstream") {
+    return run_admin_cli(std::move(args));
   }
 
   enum class Command { run, validate };

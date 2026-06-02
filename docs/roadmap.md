@@ -30,7 +30,9 @@ Current status:
   changes require daemon restart;
 - `gatewayd.health`, `gatewayd.upstreams`, and `gatewayd.events` provide the
   first status/event surface;
-- CLI management commands beyond `run` and `validate` remain pending.
+- CLI management commands cover `status`, `upstreams`, `events`, `reload`, and
+  upstream enable/disable;
+- loopback defaults are documented for the current local middleware mode.
 
 ## Phase 2: Operational Service
 

@@ -72,6 +72,18 @@ Without `--config`, `run` and `validate` discover config in this order:
 The sample upstreams are disabled, so the daemon can start without external MCP
 servers. Enable real upstreams to test end-to-end routing.
 
+The default admin CLI target is `http://127.0.0.1:39932/admin`. Override it with
+`--admin-url <url>` or `CXXMCP_GATEWAYD_ADMIN_URL`.
+
+```powershell
+build\cxxmcp-gatewayd.exe status
+build\cxxmcp-gatewayd.exe upstreams
+build\cxxmcp-gatewayd.exe events
+build\cxxmcp-gatewayd.exe reload
+build\cxxmcp-gatewayd.exe upstream enable default filesystem
+build\cxxmcp-gatewayd.exe upstream disable default filesystem
+```
+
 ## Current Admin Tools
 
 - `gatewayd.health`
@@ -121,3 +133,9 @@ Restart argument:
 
 It must not reimplement MCP protocol machinery or gateway data-plane routing.
 Those stay in `cxxmcp` and `cxxmcp-gateway`.
+
+## Local Security Defaults
+
+The daemon examples bind MCP and admin endpoints to `127.0.0.1`. Binding either
+endpoint outside loopback is a deployment/security decision and should not be
+treated as the default local middleware mode.
