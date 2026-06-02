@@ -138,11 +138,18 @@ std::optional<std::string> discover_config_path() {
   return std::nullopt;
 }
 
+std::int64_t unix_time_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
 void record_event(GatewaydState& state,
                   std::string type,
                   Json detail = Json::object()) {
   Json event{
       {"id", state.next_event_id++},
+      {"unixMs", unix_time_ms()},
       {"type", std::move(type)},
       {"detail", std::move(detail)},
   };

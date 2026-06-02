@@ -65,7 +65,10 @@ Current status:
 - loopback-only binding is enforced by default for admin and profile endpoints;
 - configs must set `security.allowNonLoopback=true` before binding outside
   loopback;
-- downstream auth, credential handling, policy, audit, and rate-limit hooks
+- daemon/admin audit events have a stable schema in `docs/audit_events.md`;
+- data-plane policy/audit enforcement requires a real `cxxmcp-gateway` runtime
+  hook and remains future work;
+- downstream auth, credential handling, policy enforcement, and rate-limit hooks
   remain future work.
 
 ## Phase 4: UI

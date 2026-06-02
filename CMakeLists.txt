@@ -55,6 +55,7 @@ install(FILES examples/gatewayd.example.json
     DESTINATION "${CMAKE_INSTALL_DATADIR}/cxxmcp-gatewayd/examples"
 )
 install(FILES
+        docs/audit_events.md
         docs/architecture.md
         docs/roadmap.md
     DESTINATION "${CMAKE_INSTALL_DOCDIR}"

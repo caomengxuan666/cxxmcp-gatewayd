@@ -166,3 +166,12 @@ Service templates live under `packaging/`:
 - `packaging/windows/uninstall-service.ps1`
 - `packaging/systemd/cxxmcp-gatewayd.service`
 - `packaging/launchd/com.cxxmcp.gatewayd.plist`
+
+## Audit Events
+
+`gatewayd.events` exposes an in-memory daemon event stream. The event schema and
+current event types are documented in `docs/audit_events.md`.
+
+Data-plane audit and allow/deny enforcement require a real
+`cxxmcp-gateway` runtime hook. `gatewayd` does not pretend to enforce tool
+policy unless the data-plane library can actually route with that policy.
