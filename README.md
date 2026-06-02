@@ -176,6 +176,24 @@ auth is enabled; token values and upstream credentials are not returned by the
 admin tools. Changing `security` or the admin endpoint requires restarting the
 daemon because the admin auth provider is installed when the endpoint starts.
 
+The same `security` block can install a fixed-window rate limiter on the admin
+endpoint and all profile MCP endpoints:
+
+```json
+{
+  "security": {
+    "rateLimit": {
+      "requestsPerWindow": 120,
+      "windowMs": 60000
+    }
+  }
+}
+```
+
+This uses the SDK `RateLimiter` hook. It is intentionally small: the window is
+process-wide for the current daemon process and is not a per-user or
+distributed quota store.
+
 ## Packaging
 
 The build installs the daemon, sample config, docs, and service templates.

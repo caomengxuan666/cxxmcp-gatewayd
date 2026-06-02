@@ -27,6 +27,7 @@
 #include "cxxmcp/protocol/types.hpp"
 #include "cxxmcp/server/auth.hpp"
 #include "cxxmcp/server/authoring.hpp"
+#include "cxxmcp/server/rate_limit.hpp"
 #include "cxxmcp/service.hpp"
 
 #ifndef CXXMCP_GATEWAYD_VERSION
@@ -51,6 +52,7 @@ struct AdminEndpoint {
 struct SecurityConfig {
   bool allow_non_loopback = false;
   std::vector<mcp::gateway::BearerTokenAuthEntry> bearer_tokens;
+  mcp::gateway::FixedWindowRateLimit rate_limit;
 };
 
 struct ProfileSpec {
@@ -223,6 +225,82 @@ std::unique_ptr<mcp::server::StaticBearerAuthProvider> make_auth_provider(
   return auth;
 }
 
+class FixedWindowRateLimiter final : public mcp::server::RateLimiter {
+ public:
+  explicit FixedWindowRateLimiter(mcp::gateway::FixedWindowRateLimit config)
+      : requests_per_window_(config.requests_per_window),
+        window_(config.window.count() > 0 ? config.window
+                                          : std::chrono::milliseconds{1000}) {}
+
+  mcp::core::Result<mcp::server::RateLimitDecision> check(
+      const mcp::server::RateLimitRequest& /*request*/) override {
+    if (requests_per_window_ == 0) {
+      return mcp::server::RateLimitDecision{};
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard lock(mutex_);
+    if (window_start_.time_since_epoch().count() == 0 ||
+        now - window_start_ >= window_) {
+      window_start_ = now;
+      count_ = 0;
+    }
+
+    if (count_ >= requests_per_window_) {
+      const auto elapsed =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              now - window_start_);
+      const auto retry_after = elapsed >= window_
+                                   ? std::chrono::milliseconds{0}
+                                   : window_ - elapsed;
+      return mcp::server::RateLimitDecision{.allowed = false,
+                                            .retry_after = retry_after};
+    }
+
+    ++count_;
+    return mcp::server::RateLimitDecision{};
+  }
+
+ private:
+  std::size_t requests_per_window_ = 0;
+  std::chrono::milliseconds window_{1000};
+  std::mutex mutex_;
+  std::chrono::steady_clock::time_point window_start_;
+  std::size_t count_ = 0;
+};
+
+std::unique_ptr<mcp::server::RateLimiter> make_rate_limiter(
+    mcp::gateway::FixedWindowRateLimit config) {
+  return std::make_unique<FixedWindowRateLimiter>(config);
+}
+
+std::optional<mcp::protocol::JsonRpcResponse> rate_limited_response(
+    mcp::server::RateLimiter& limiter,
+    const mcp::protocol::JsonRpcRequest& request) {
+  mcp::server::RateLimitRequest rate_request;
+  rate_request.method = request.method;
+  const auto decision = limiter.check(rate_request);
+  if (!decision) {
+    return mcp::protocol::make_error_response(
+        request.id,
+        mcp::protocol::make_error(
+            static_cast<int>(mcp::protocol::ErrorCode::RateLimited),
+            "rate limiting failed",
+            decision.error().message.empty()
+                ? std::nullopt
+                : std::optional<mcp::protocol::Json>{
+                      decision.error().message}));
+  }
+  if (!decision->allowed) {
+    return mcp::protocol::make_error_response(
+        request.id,
+        mcp::protocol::make_error(
+            static_cast<int>(mcp::protocol::ErrorCode::RateLimited),
+            "request rate limited"));
+  }
+  return std::nullopt;
+}
+
 mcp::core::Result<SecurityConfig> parse_security_config(const Json& root) {
   SecurityConfig security;
   const auto item = root.find("security");
@@ -244,6 +322,49 @@ mcp::core::Result<SecurityConfig> parse_security_config(const Json& root) {
           "gatewayd.config"});
     }
     security.allow_non_loopback = allow->get<bool>();
+  }
+
+  if (const auto rate_limit = item->find("rateLimit");
+      rate_limit != item->end()) {
+    if (!rate_limit->is_object()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security.rateLimit must be an object", "", "gatewayd.config"});
+    }
+    const auto requests = rate_limit->find("requestsPerWindow");
+    if (requests == rate_limit->end() || !requests->is_number_unsigned()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security.rateLimit.requestsPerWindow must be a positive integer",
+          "", "gatewayd.config"});
+    }
+    const auto request_count = requests->get<std::size_t>();
+    if (request_count == 0) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security.rateLimit.requestsPerWindow must be positive", "",
+          "gatewayd.config"});
+    }
+    security.rate_limit.requests_per_window = request_count;
+
+    if (const auto window = rate_limit->find("windowMs");
+        window != rate_limit->end()) {
+      if (!window->is_number_unsigned()) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security.rateLimit.windowMs must be a positive integer", "",
+            "gatewayd.config"});
+      }
+      const auto window_ms = window->get<std::uint64_t>();
+      if (window_ms == 0) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security.rateLimit.windowMs must be positive", "",
+            "gatewayd.config"});
+      }
+      security.rate_limit.window =
+          std::chrono::milliseconds{static_cast<std::int64_t>(window_ms)};
+    }
   }
 
   const auto tokens = item->find("bearerTokens");
@@ -374,7 +495,9 @@ Json state_health_json(const GatewaydState& state) {
       {"adminUrl", admin_url(state.admin)},
       {"configPath", state.config_path},
       {"security",
-       Json{{"bearerAuthEnabled", !state.security.bearer_tokens.empty()}}},
+       Json{{"bearerAuthEnabled", !state.security.bearer_tokens.empty()},
+            {"rateLimitEnabled",
+             state.security.rate_limit.requests_per_window > 0}}},
       {"profiles", std::move(profiles)},
   };
 }
@@ -913,6 +1036,7 @@ mcp::core::Result<LoadedGatewaydConfig> load_gatewayd_config(
         static_cast<std::uint16_t>(39931 + profiles.size());
     profile.endpoint.path = "/mcp/" + profile.id;
     profile.endpoint.bearer_tokens = security->bearer_tokens;
+    profile.endpoint.rate_limit = security->rate_limit;
     if (const auto endpoint_json = item.find("endpoint");
         endpoint_json != item.end()) {
       if (auto error =
@@ -974,7 +1098,10 @@ bool same_admin_endpoint(const AdminEndpoint& lhs, const AdminEndpoint& rhs) {
 bool same_security_config(const SecurityConfig& lhs,
                           const SecurityConfig& rhs) {
   if (lhs.allow_non_loopback != rhs.allow_non_loopback ||
-      lhs.bearer_tokens.size() != rhs.bearer_tokens.size()) {
+      lhs.bearer_tokens.size() != rhs.bearer_tokens.size() ||
+      lhs.rate_limit.requests_per_window !=
+          rhs.rate_limit.requests_per_window ||
+      lhs.rate_limit.window != rhs.rate_limit.window) {
     return false;
   }
   for (std::size_t i = 0; i < lhs.bearer_tokens.size(); ++i) {
@@ -1223,9 +1350,20 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
   if (!state->security.bearer_tokens.empty()) {
     builder.auth_provider(make_auth_provider(state->security.bearer_tokens));
   }
+  std::shared_ptr<mcp::server::RateLimiter> rate_limiter;
+  if (state->security.rate_limit.requests_per_window > 0) {
+    rate_limiter = make_rate_limiter(state->security.rate_limit);
+  }
   auto peer =
       builder.streamable_http(state->admin.host, state->admin.port,
                               state->admin.path)
+          .raw_request([rate_limiter](
+                           const mcp::protocol::JsonRpcRequest& request) {
+            if (rate_limiter) {
+              return rate_limited_response(*rate_limiter, request);
+            }
+            return std::optional<mcp::protocol::JsonRpcResponse>{};
+          })
           .tool<Json, ToolResult>(
               "gatewayd.health",
               [state](const Json&) {

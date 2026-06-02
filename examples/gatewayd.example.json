@@ -6,7 +6,11 @@
   },
   "security": {
     "allowNonLoopback": false,
-    "bearerTokens": []
+    "bearerTokens": [],
+    "rateLimit": {
+      "requestsPerWindow": 120,
+      "windowMs": 60000
+    }
   },
   "profiles": [
     {

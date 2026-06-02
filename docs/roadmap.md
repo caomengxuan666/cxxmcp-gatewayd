@@ -72,8 +72,9 @@ Current status:
   `cxxmcp-gateway` runtime for `tools/list` and `tools/call`;
 - downstream static bearer auth is wired through the SDK auth provider for
   admin and profile MCP endpoints via `security.bearerTokens`;
-- credential handling, non-tool policy families, and rate-limit hooks remain
-  future work.
+- fixed-window request admission is wired through the SDK rate limiter hook via
+  `security.rateLimit`;
+- credential handling and non-tool policy families remain future work.
 
 ## Phase 4: UI
 
