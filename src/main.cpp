@@ -98,6 +98,8 @@ void print_usage(std::ostream& out) {
          "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd catalog <tools|resources|prompts> "
          "[--admin-url <url>] [--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd dashboard [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd events [--admin-url <url>] "
          "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd diagnostics [--admin-url <url>] "
@@ -1389,6 +1391,139 @@ void print_tool_result(const ToolResult& result) {
   }
 }
 
+mcp::core::Result<Json> tool_result_text_json(const ToolResult& result) {
+  for (const auto& block : result.content) {
+    if (block.type != "text") {
+      continue;
+    }
+    try {
+      return Json::parse(block.text);
+    } catch (const std::exception& ex) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::ParseError),
+          "admin tool returned non-json text", ex.what(), "gatewayd.cli"});
+    }
+  }
+  if (result.structured_content.has_value()) {
+    return *result.structured_content;
+  }
+  return mcp::core::unexpected(mcp::core::Error{
+      static_cast<int>(mcp::protocol::ErrorCode::InvalidRequest),
+      "admin tool returned no json content", "", "gatewayd.cli"});
+}
+
+mcp::core::Result<Json> call_admin_json(
+    const std::string& admin_url,
+    const std::optional<std::string>& bearer_token,
+    std::string_view tool_name,
+    Json arguments = Json::object()) {
+  auto result = call_admin_tool(admin_url, bearer_token, tool_name,
+                                std::move(arguments));
+  if (!result) {
+    return mcp::core::unexpected(result.error());
+  }
+  if (result->is_error_result()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidRequest),
+        "admin tool returned an error result", std::string(tool_name),
+        "gatewayd.cli"});
+  }
+  return tool_result_text_json(*result);
+}
+
+std::size_t array_size_at(const Json& json, std::string_view key) {
+  const auto it = json.find(std::string(key));
+  return it != json.end() && it->is_array() ? it->size() : 0;
+}
+
+void print_dashboard_count_line(const Json& catalog,
+                                std::string_view field) {
+  const auto profiles = catalog.find("profiles");
+  if (profiles == catalog.end() || !profiles->is_array()) {
+    return;
+  }
+  for (const auto& profile : *profiles) {
+    const auto id = profile.value("id", "");
+    if (profile.contains("error")) {
+      std::cout << "  " << id << ": error "
+                << profile["error"].value("message", "unknown") << "\n";
+      continue;
+    }
+    std::cout << "  " << id << ": "
+              << array_size_at(profile, field) << " " << field << "\n";
+  }
+}
+
+int run_dashboard_cli(const std::string& admin_url,
+                      const std::optional<std::string>& bearer_token) {
+  const auto health =
+      call_admin_json(admin_url, bearer_token, "gatewayd.health");
+  const auto profiles =
+      call_admin_json(admin_url, bearer_token, "gatewayd.profiles");
+  const auto upstreams =
+      call_admin_json(admin_url, bearer_token, "gatewayd.upstreams");
+  const auto tools =
+      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.tools");
+  const auto resources =
+      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.resources");
+  const auto prompts =
+      call_admin_json(admin_url, bearer_token, "gatewayd.catalog.prompts");
+  const auto events =
+      call_admin_json(admin_url, bearer_token, "gatewayd.events");
+
+  for (const auto* item :
+       {&health, &profiles, &upstreams, &tools, &resources, &prompts,
+        &events}) {
+    if (!*item) {
+      std::cerr << "dashboard failed: " << item->error().message;
+      if (!item->error().detail.empty()) {
+        std::cerr << ": " << item->error().detail;
+      }
+      std::cerr << "\n";
+      return 1;
+    }
+  }
+
+  std::cout << "cxxmcp-gatewayd dashboard\n";
+  std::cout << "status: " << health->value("status", "unknown") << "\n";
+  std::cout << "admin: " << health->value("adminUrl", admin_url) << "\n";
+  std::cout << "config: " << health->value("configPath", "") << "\n\n";
+
+  std::cout << "profiles\n";
+  for (const auto& profile : profiles->value("profiles", Json::array())) {
+    const auto endpoint = profile.value("endpoint", Json::object());
+    std::cout << "  " << profile.value("id", "") << "  "
+              << endpoint.value("url", "") << "  upstreams="
+              << array_size_at(profile, "upstreams") << "\n";
+  }
+
+  std::cout << "\nupstreams\n";
+  for (const auto& profile : upstreams->value("profiles", Json::array())) {
+    std::cout << "  [" << profile.value("id", "") << "]\n";
+    for (const auto& upstream : profile.value("configured", Json::array())) {
+      std::cout << "    " << upstream.value("id", "")
+                << " enabled=" << (upstream.value("enabled", false) ? "true"
+                                                                    : "false")
+                << " transport=" << upstream.value("transport", "") << "\n";
+    }
+  }
+
+  std::cout << "\ncatalog\n";
+  print_dashboard_count_line(*tools, "tools");
+  print_dashboard_count_line(*resources, "resources");
+  print_dashboard_count_line(*prompts, "prompts");
+
+  std::cout << "\nrecent events\n";
+  const auto event_items = events->value("events", Json::array());
+  const auto start = event_items.size() > 8 ? event_items.size() - 8 : 0;
+  for (std::size_t i = start; i < event_items.size(); ++i) {
+    const auto& event = event_items[i];
+    std::cout << "  #" << event.value("id", 0) << " "
+              << event.value("type", "") << "\n";
+  }
+  return 0;
+}
+
 bool parse_admin_url(std::vector<std::string_view>& args,
                      std::string& admin_url) {
   for (std::size_t i = 0; i < args.size();) {
@@ -1437,6 +1572,9 @@ int run_admin_cli(std::vector<std::string_view> args) {
   if (args.empty()) {
     print_usage(std::cerr);
     return 2;
+  }
+  if (args[0] == "dashboard" && args.size() == 1) {
+    return run_dashboard_cli(admin_url, bearer_token);
   }
 
   std::string tool;
@@ -1632,6 +1770,7 @@ int main(int argc, char** argv) {
 
   if (args[0] == "status" || args[0] == "profiles" ||
       args[0] == "upstreams" || args[0] == "catalog" ||
+      args[0] == "dashboard" ||
       args[0] == "events" || args[0] == "diagnostics" ||
       args[0] == "reload" ||
       args[0] == "upstream") {

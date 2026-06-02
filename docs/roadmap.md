@@ -100,4 +100,6 @@ Current status:
   `gatewayd.upstream.enable` and `gatewayd.upstream.disable`;
 - catalog inspection is available through `gatewayd.catalog.tools`,
   `gatewayd.catalog.resources`, and `gatewayd.catalog.prompts`;
-- a GUI/dashboard frontend remains future work.
+- a minimal admin API-backed CLI dashboard is available through
+  `cxxmcp-gatewayd dashboard`;
+- a graphical dashboard frontend remains future work.

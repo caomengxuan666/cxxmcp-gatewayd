@@ -83,6 +83,7 @@ build\cxxmcp-gatewayd.exe upstreams
 build\cxxmcp-gatewayd.exe catalog tools
 build\cxxmcp-gatewayd.exe catalog resources
 build\cxxmcp-gatewayd.exe catalog prompts
+build\cxxmcp-gatewayd.exe dashboard
 build\cxxmcp-gatewayd.exe events
 build\cxxmcp-gatewayd.exe diagnostics
 build\cxxmcp-gatewayd.exe reload
