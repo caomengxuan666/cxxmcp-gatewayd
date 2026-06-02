@@ -25,6 +25,7 @@
 #include "cxxmcp/peer.hpp"
 #include "cxxmcp/protocol/tool.hpp"
 #include "cxxmcp/protocol/types.hpp"
+#include "cxxmcp/server/auth.hpp"
 #include "cxxmcp/server/authoring.hpp"
 #include "cxxmcp/service.hpp"
 
@@ -47,6 +48,11 @@ struct AdminEndpoint {
   std::string path = "/admin";
 };
 
+struct SecurityConfig {
+  bool allow_non_loopback = false;
+  std::vector<mcp::gateway::BearerTokenAuthEntry> bearer_tokens;
+};
+
 struct ProfileSpec {
   std::string id = "default";
   mcp::gateway::HttpEndpoint endpoint;
@@ -61,6 +67,7 @@ struct ProfileRuntime {
 
 struct GatewaydState {
   AdminEndpoint admin;
+  SecurityConfig security;
   std::string config_path;
   std::uint64_t next_event_id = 1;
   std::weak_ptr<GatewaydState> self;
@@ -69,26 +76,40 @@ struct GatewaydState {
   std::vector<Json> events;
 };
 
+struct LoadedGatewaydConfig {
+  AdminEndpoint admin;
+  SecurityConfig security;
+  std::vector<ProfileSpec> profiles;
+};
+
 void print_usage(std::ostream& out) {
   out << "Usage:\n"
       << "  cxxmcp-gatewayd --help\n"
       << "  cxxmcp-gatewayd --version\n"
       << "  cxxmcp-gatewayd validate [--config <file>]\n"
       << "  cxxmcp-gatewayd run [--config <file>]\n"
-      << "  cxxmcp-gatewayd status [--admin-url <url>]\n"
-      << "  cxxmcp-gatewayd upstreams [--admin-url <url>]\n"
-      << "  cxxmcp-gatewayd events [--admin-url <url>]\n"
-      << "  cxxmcp-gatewayd diagnostics [--admin-url <url>]\n"
-      << "  cxxmcp-gatewayd reload [--admin-url <url>]\n"
+      << "  cxxmcp-gatewayd status [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd upstreams [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd events [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd diagnostics [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
+      << "  cxxmcp-gatewayd reload [--admin-url <url>] "
+         "[--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd upstream enable <profile> <upstream> "
-         "[--admin-url <url>]\n"
+         "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd upstream disable <profile> <upstream> "
-         "[--admin-url <url>]\n"
+         "[--admin-url <url>] [--bearer-token <token>]\n"
       << "  cxxmcp-gatewayd --config <file>   # legacy alias for run\n\n"
       << "Config discovery without --config:\n"
       << "  1. CXXMCP_GATEWAYD_CONFIG\n"
       << "  2. ./gatewayd.json\n"
       << "  3. ./gatewayd.config.json\n\n"
+      << "Admin CLI token discovery:\n"
+      << "  1. --bearer-token <token>\n"
+      << "  2. CXXMCP_GATEWAYD_ADMIN_TOKEN\n\n"
       << "Config shape:\n"
       << "  {\n"
       << "    \"admin\": {\"host\":\"127.0.0.1\", \"port\":39932, "
@@ -189,14 +210,123 @@ bool is_loopback_host(std::string_view host) {
          host == "[::1]";
 }
 
-bool allow_non_loopback_bind(const Json& root) {
-  const auto security = root.find("security");
-  if (security == root.end() || !security->is_object()) {
-    return false;
+std::unique_ptr<mcp::server::StaticBearerAuthProvider> make_auth_provider(
+    const std::vector<mcp::gateway::BearerTokenAuthEntry>& entries) {
+  auto auth = std::make_unique<mcp::server::StaticBearerAuthProvider>();
+  for (const auto& entry : entries) {
+    auth->add_token(entry.token,
+                    mcp::server::AuthIdentity{
+                        .subject = entry.subject,
+                        .claims = {{"service", "cxxmcp-gatewayd"}},
+                    });
   }
-  const auto allow = security->find("allowNonLoopback");
-  return allow != security->end() && allow->is_boolean() &&
-         allow->get<bool>();
+  return auth;
+}
+
+mcp::core::Result<SecurityConfig> parse_security_config(const Json& root) {
+  SecurityConfig security;
+  const auto item = root.find("security");
+  if (item == root.end()) {
+    return security;
+  }
+  if (!item->is_object()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "security must be an object", "", "gatewayd.config"});
+  }
+
+  if (const auto allow = item->find("allowNonLoopback");
+      allow != item->end()) {
+    if (!allow->is_boolean()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security.allowNonLoopback must be a boolean", "",
+          "gatewayd.config"});
+    }
+    security.allow_non_loopback = allow->get<bool>();
+  }
+
+  const auto tokens = item->find("bearerTokens");
+  if (tokens == item->end()) {
+    return security;
+  }
+  if (!tokens->is_array()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "security.bearerTokens must be an array", "", "gatewayd.config"});
+  }
+
+  for (std::size_t i = 0; i < tokens->size(); ++i) {
+    const auto& token_item = (*tokens)[i];
+    const auto path =
+        "security.bearerTokens[" + std::to_string(i) + "]";
+    if (!token_item.is_object()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security bearer token entry must be an object", path,
+          "gatewayd.config"});
+    }
+
+    std::optional<std::string> token;
+    if (const auto value = token_item.find("token");
+        value != token_item.end()) {
+      if (!value->is_string()) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security bearer token must be a string", path + ".token",
+            "gatewayd.config"});
+      }
+      token = value->get<std::string>();
+    }
+    if (const auto env = token_item.find("tokenEnv");
+        env != token_item.end()) {
+      if (!env->is_string()) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security bearer tokenEnv must be a string", path + ".tokenEnv",
+            "gatewayd.config"});
+      }
+      const auto env_name = env->get<std::string>();
+      const char* env_value = std::getenv(env_name.c_str());
+      if (env_value == nullptr || *env_value == '\0') {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security bearer tokenEnv is not set", env_name,
+            "gatewayd.config"});
+      }
+      token = std::string(env_value);
+    }
+    if (!token.has_value() || token->empty()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security bearer token entry requires token or tokenEnv", path,
+          "gatewayd.config"});
+    }
+
+    std::string subject = "gatewayd-user";
+    if (const auto subject_value = token_item.find("subject");
+        subject_value != token_item.end()) {
+      if (!subject_value->is_string()) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+            "security bearer token subject must be a string",
+            path + ".subject", "gatewayd.config"});
+      }
+      subject = subject_value->get<std::string>();
+    }
+    if (subject.empty()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "security bearer token subject must not be empty", path + ".subject",
+          "gatewayd.config"});
+    }
+
+    security.bearer_tokens.push_back(
+        mcp::gateway::BearerTokenAuthEntry{.token = std::move(*token),
+                                           .subject = std::move(subject)});
+  }
+
+  return security;
 }
 
 std::string status_to_string(mcp::gateway::UpstreamRuntimeStatus status) {
@@ -243,6 +373,8 @@ Json state_health_json(const GatewaydState& state) {
       {"status", "ok"},
       {"adminUrl", admin_url(state.admin)},
       {"configPath", state.config_path},
+      {"security",
+       Json{{"bearerAuthEnabled", !state.security.bearer_tokens.empty()}}},
       {"profiles", std::move(profiles)},
   };
 }
@@ -703,8 +835,8 @@ std::optional<std::string> parse_admin(const Json& json,
   return std::nullopt;
 }
 
-mcp::core::Result<std::pair<AdminEndpoint, std::vector<ProfileSpec>>>
-load_gatewayd_config(const std::string& path) {
+mcp::core::Result<LoadedGatewaydConfig> load_gatewayd_config(
+    const std::string& path) {
   Json root;
   try {
     root = Json::parse(read_text_file(path));
@@ -720,8 +852,13 @@ load_gatewayd_config(const std::string& path) {
         "gatewayd config root must be an object", "", "gatewayd.config"});
   }
 
+  auto security = parse_security_config(root);
+  if (!security) {
+    return mcp::core::unexpected(security.error());
+  }
+
   AdminEndpoint admin;
-  const bool allow_non_loopback = allow_non_loopback_bind(root);
+  const bool allow_non_loopback = security->allow_non_loopback;
   if (const auto admin_json = root.find("admin");
       admin_json != root.end()) {
     if (auto error = parse_admin(*admin_json, admin)) {
@@ -735,6 +872,14 @@ load_gatewayd_config(const std::string& path) {
         static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
         "admin endpoint host is not loopback",
         "set security.allowNonLoopback=true to bind outside loopback",
+        "gatewayd.config"});
+  }
+  if (allow_non_loopback && !is_loopback_host(admin.host) &&
+      security->bearer_tokens.empty()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "admin endpoint non-loopback bind requires bearer auth",
+        "set security.bearerTokens before binding outside loopback",
         "gatewayd.config"});
   }
 
@@ -767,6 +912,7 @@ load_gatewayd_config(const std::string& path) {
     profile.endpoint.port =
         static_cast<std::uint16_t>(39931 + profiles.size());
     profile.endpoint.path = "/mcp/" + profile.id;
+    profile.endpoint.bearer_tokens = security->bearer_tokens;
     if (const auto endpoint_json = item.find("endpoint");
         endpoint_json != item.end()) {
       if (auto error =
@@ -784,6 +930,14 @@ load_gatewayd_config(const std::string& path) {
           item_path + ".endpoint.host requires security.allowNonLoopback=true",
           "gatewayd.config"});
     }
+    if (allow_non_loopback && !is_loopback_host(profile.endpoint.host) &&
+        security->bearer_tokens.empty()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "profile endpoint non-loopback bind requires bearer auth",
+          item_path + ".endpoint.host requires security.bearerTokens",
+          "gatewayd.config"});
+    }
 
     auto document = mcp::gateway::gateway_config_document_from_json(item);
     if (!document) {
@@ -795,8 +949,11 @@ load_gatewayd_config(const std::string& path) {
     profiles.push_back(std::move(profile));
   }
 
-  return std::pair<AdminEndpoint, std::vector<ProfileSpec>>{
-      std::move(admin), std::move(profiles)};
+  return LoadedGatewaydConfig{
+      .admin = std::move(admin),
+      .security = std::move(*security),
+      .profiles = std::move(profiles),
+  };
 }
 
 void print_config_summary(const AdminEndpoint& admin,
@@ -814,6 +971,21 @@ bool same_admin_endpoint(const AdminEndpoint& lhs, const AdminEndpoint& rhs) {
   return lhs.host == rhs.host && lhs.port == rhs.port && lhs.path == rhs.path;
 }
 
+bool same_security_config(const SecurityConfig& lhs,
+                          const SecurityConfig& rhs) {
+  if (lhs.allow_non_loopback != rhs.allow_non_loopback ||
+      lhs.bearer_tokens.size() != rhs.bearer_tokens.size()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < lhs.bearer_tokens.size(); ++i) {
+    if (lhs.bearer_tokens[i].token != rhs.bearer_tokens[i].token ||
+        lhs.bearer_tokens[i].subject != rhs.bearer_tokens[i].subject) {
+      return false;
+    }
+  }
+  return true;
+}
+
 Json reload_config_json(GatewaydState& state, const Json&) {
   std::lock_guard lock(state.mutex);
   if (state.config_path.empty()) {
@@ -827,10 +999,18 @@ Json reload_config_json(GatewaydState& state, const Json&) {
                  Json{{"error", error_json(loaded.error())["error"]}});
     return error_json(loaded.error());
   }
-  if (!same_admin_endpoint(state.admin, loaded->first)) {
+  if (!same_admin_endpoint(state.admin, loaded->admin)) {
     auto result = usage_error_json(
         "admin endpoint change requires daemon restart",
         "profile endpoints can reload in-process; admin endpoint cannot");
+    record_event(state, "config.reload.failed",
+                 Json{{"error", result["error"]}});
+    return result;
+  }
+  if (!same_security_config(state.security, loaded->security)) {
+    auto result = usage_error_json(
+        "security config change requires daemon restart",
+        "admin auth is installed when the admin endpoint starts");
     record_event(state, "config.reload.failed",
                  Json{{"error", result["error"]}});
     return result;
@@ -839,7 +1019,7 @@ Json reload_config_json(GatewaydState& state, const Json&) {
   auto previous = std::move(state.profiles);
   stop_profiles(previous);
 
-  auto started = start_profiles(std::move(loaded->second), state.self);
+  auto started = start_profiles(std::move(loaded->profiles), state.self);
   if (!started) {
     for (const auto& profile : previous) {
       if (profile) {
@@ -871,12 +1051,22 @@ std::string default_admin_url() {
   return "http://127.0.0.1:39932/admin";
 }
 
+std::optional<std::string> default_admin_bearer_token() {
+  if (const char* env = std::getenv("CXXMCP_GATEWAYD_ADMIN_TOKEN");
+      env != nullptr && *env != '\0') {
+    return std::string(env);
+  }
+  return std::nullopt;
+}
+
 mcp::core::Result<ToolResult> call_admin_tool(
     std::string admin_url,
+    std::optional<std::string> bearer_token,
     std::string_view tool_name,
     Json arguments = Json::object()) {
   mcp::client::Client::StreamableHttpEndpoint endpoint;
   endpoint.uri = std::move(admin_url);
+  endpoint.auth_header = std::move(bearer_token);
 
   auto running = mcp::serve(
       mcp::ClientPeer::connect_streamable_http(std::move(endpoint)));
@@ -935,10 +1125,32 @@ bool parse_admin_url(std::vector<std::string_view>& args,
   return true;
 }
 
+bool parse_admin_bearer_token(std::vector<std::string_view>& args,
+                              std::optional<std::string>& bearer_token) {
+  for (std::size_t i = 0; i < args.size();) {
+    if (args[i] != "--bearer-token") {
+      ++i;
+      continue;
+    }
+    if (i + 1 >= args.size()) {
+      return false;
+    }
+    bearer_token = std::string(args[i + 1]);
+    args.erase(args.begin() + static_cast<std::ptrdiff_t>(i),
+               args.begin() + static_cast<std::ptrdiff_t>(i + 2));
+  }
+  return true;
+}
+
 int run_admin_cli(std::vector<std::string_view> args) {
   std::string admin_url = default_admin_url();
+  std::optional<std::string> bearer_token = default_admin_bearer_token();
   if (!parse_admin_url(args, admin_url)) {
     std::cerr << "--admin-url requires a value\n";
+    return 2;
+  }
+  if (!parse_admin_bearer_token(args, bearer_token)) {
+    std::cerr << "--bearer-token requires a value\n";
     return 2;
   }
   if (args.empty()) {
@@ -963,7 +1175,7 @@ int run_admin_cli(std::vector<std::string_view> args) {
           std::pair<std::string_view, std::string_view>{"events",
                                                         "gatewayd.events"}}) {
       std::cout << "== " << item.first << " ==\n";
-      auto result = call_admin_tool(admin_url, item.second);
+      auto result = call_admin_tool(admin_url, bearer_token, item.second);
       if (!result) {
         std::cerr << "admin command failed: " << result.error().message;
         if (!result.error().detail.empty()) {
@@ -990,7 +1202,8 @@ int run_admin_cli(std::vector<std::string_view> args) {
     return 2;
   }
 
-  auto result = call_admin_tool(std::move(admin_url), tool, std::move(arguments));
+  auto result = call_admin_tool(std::move(admin_url), std::move(bearer_token),
+                                tool, std::move(arguments));
   if (!result) {
     std::cerr << "admin command failed: " << result.error().message;
     if (!result.error().detail.empty()) {
@@ -1005,12 +1218,14 @@ int run_admin_cli(std::vector<std::string_view> args) {
 
 mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
     const std::shared_ptr<GatewaydState>& state) {
+  auto builder = mcp::ServerPeer::builder();
+  builder.name("cxxmcp-gatewayd-admin").version(CXXMCP_GATEWAYD_VERSION);
+  if (!state->security.bearer_tokens.empty()) {
+    builder.auth_provider(make_auth_provider(state->security.bearer_tokens));
+  }
   auto peer =
-      mcp::ServerPeer::builder()
-          .name("cxxmcp-gatewayd-admin")
-          .version(CXXMCP_GATEWAYD_VERSION)
-          .streamable_http(state->admin.host, state->admin.port,
-                           state->admin.path)
+      builder.streamable_http(state->admin.host, state->admin.port,
+                              state->admin.path)
           .tool<Json, ToolResult>(
               "gatewayd.health",
               [state](const Json&) {
@@ -1133,16 +1348,17 @@ int main(int argc, char** argv) {
   }
 
   if (command == Command::validate) {
-    print_config_summary(loaded->first, loaded->second);
+    print_config_summary(loaded->admin, loaded->profiles);
     return 0;
   }
 
   auto state = std::make_shared<GatewaydState>();
   state->self = state;
-  state->admin = std::move(loaded->first);
+  state->admin = std::move(loaded->admin);
+  state->security = std::move(loaded->security);
   state->config_path = config_path;
 
-  auto profiles = start_profiles(std::move(loaded->second), state->self);
+  auto profiles = start_profiles(std::move(loaded->profiles), state->self);
   if (!profiles) {
     std::cerr << "failed to start profiles: " << profiles.error().message;
     if (!profiles.error().detail.empty()) {

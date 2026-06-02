@@ -64,14 +64,16 @@ Current status:
 
 - loopback-only binding is enforced by default for admin and profile endpoints;
 - configs must set `security.allowNonLoopback=true` before binding outside
-  loopback;
+  loopback, and non-loopback binds also require `security.bearerTokens`;
 - daemon/admin audit events have a stable schema in `docs/audit_events.md`;
 - tool data-plane audit events cover `tools/list`, `tools/call`, and policy
   denies through the `cxxmcp-gateway` runtime observer;
 - data-plane exact-match tool allow/deny policy is enforced by the
   `cxxmcp-gateway` runtime for `tools/list` and `tools/call`;
-- downstream auth, credential handling, non-tool policy families, and
-  rate-limit hooks remain future work.
+- downstream static bearer auth is wired through the SDK auth provider for
+  admin and profile MCP endpoints via `security.bearerTokens`;
+- credential handling, non-tool policy families, and rate-limit hooks remain
+  future work.
 
 ## Phase 4: UI
 

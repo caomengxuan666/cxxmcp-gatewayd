@@ -4,6 +4,10 @@
     "port": 39932,
     "path": "/admin"
   },
+  "security": {
+    "allowNonLoopback": false,
+    "bearerTokens": []
+  },
   "profiles": [
     {
       "id": "default",

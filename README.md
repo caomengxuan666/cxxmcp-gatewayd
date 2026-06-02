@@ -73,7 +73,8 @@ The sample upstreams are disabled, so the daemon can start without external MCP
 servers. Enable real upstreams to test end-to-end routing.
 
 The default admin CLI target is `http://127.0.0.1:39932/admin`. Override it with
-`--admin-url <url>` or `CXXMCP_GATEWAYD_ADMIN_URL`.
+`--admin-url <url>` or `CXXMCP_GATEWAYD_ADMIN_URL`. When bearer auth is enabled,
+pass `--bearer-token <token>` or set `CXXMCP_GATEWAYD_ADMIN_TOKEN`.
 
 ```powershell
 build\cxxmcp-gatewayd.exe status
@@ -141,15 +142,39 @@ The daemon examples bind MCP and admin endpoints to `127.0.0.1`. Binding either
 endpoint outside loopback is a deployment/security decision and should not be
 treated as the default local middleware mode.
 
-Non-loopback binds are rejected unless the config explicitly opts in:
+Non-loopback binds are rejected unless the config explicitly opts in and
+configures bearer auth:
 
 ```json
 {
   "security": {
-    "allowNonLoopback": true
+    "allowNonLoopback": true,
+    "bearerTokens": [
+      {"tokenEnv": "CXXMCP_GATEWAYD_TOKEN", "subject": "local-admin"}
+    ]
   }
 }
 ```
+
+Bearer auth can be enabled for the admin endpoint and all profile MCP endpoints
+with `security.bearerTokens`. Tokens may be inline for local smoke tests or read
+from environment variables for normal use:
+
+```json
+{
+  "security": {
+    "bearerTokens": [
+      {"tokenEnv": "CXXMCP_GATEWAYD_TOKEN", "subject": "local-admin"}
+    ]
+  }
+}
+```
+
+When bearer auth is configured, clients must send
+`Authorization: Bearer <token>`. `gatewayd.health` reports only whether bearer
+auth is enabled; token values and upstream credentials are not returned by the
+admin tools. Changing `security` or the admin endpoint requires restarting the
+daemon because the admin auth provider is installed when the endpoint starts.
 
 ## Packaging
 
