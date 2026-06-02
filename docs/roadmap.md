@@ -66,10 +66,10 @@ Current status:
 - configs must set `security.allowNonLoopback=true` before binding outside
   loopback;
 - daemon/admin audit events have a stable schema in `docs/audit_events.md`;
-- data-plane policy/audit enforcement requires a real `cxxmcp-gateway` runtime
-  hook and remains future work;
-- downstream auth, credential handling, policy enforcement, and rate-limit hooks
-  remain future work.
+- data-plane exact-match tool allow/deny policy is enforced by the
+  `cxxmcp-gateway` runtime for `tools/list` and `tools/call`;
+- data-plane audit events for routed calls, downstream auth, credential
+  handling, non-tool policy families, and rate-limit hooks remain future work.
 
 ## Phase 4: UI
 

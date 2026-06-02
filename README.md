@@ -175,3 +175,26 @@ current event types are documented in `docs/audit_events.md`.
 Data-plane audit and allow/deny enforcement require a real
 `cxxmcp-gateway` runtime hook. `gatewayd` does not pretend to enforce tool
 policy unless the data-plane library can actually route with that policy.
+
+## Tool Policy
+
+Profiles can use the `cxxmcp-gateway` data-plane tool policy:
+
+```json
+{
+  "profiles": [
+    {
+      "id": "default",
+      "policy": {
+        "allowTools": ["workspace.workspace_scan"],
+        "denyTools": ["workspace.workspace_read_file"]
+      },
+      "upstreams": []
+    }
+  ]
+}
+```
+
+`denyTools` wins over `allowTools`. When `allowTools` is non-empty, only listed
+exposed tool names are visible and callable. The policy applies to `tools/list`
+and `tools/call`.

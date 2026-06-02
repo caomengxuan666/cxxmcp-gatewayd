@@ -38,7 +38,8 @@ Fields:
 
 ## Boundary
 
-These events cover daemon and admin/control-plane operations. Data-plane audit
-for downstream MCP `tools/list`, `tools/call`, resources, prompts, completions,
-and policy decisions requires an explicit `cxxmcp-gateway` runtime hook. It
-should not be simulated in `gatewayd` without actual routing enforcement.
+These events cover daemon and admin/control-plane operations. Tool allow/deny
+policy is enforced by the `cxxmcp-gateway` data plane, but data-plane audit
+events for downstream MCP `tools/list`, `tools/call`, resources, prompts,
+completions, and policy decisions still require an explicit runtime audit hook.
+They should not be simulated in `gatewayd` without actual routing evidence.
