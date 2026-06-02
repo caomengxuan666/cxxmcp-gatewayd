@@ -60,6 +60,14 @@ Current status:
 - audit event schema;
 - rate-limit hooks.
 
+Current status:
+
+- loopback-only binding is enforced by default for admin and profile endpoints;
+- configs must set `security.allowNonLoopback=true` before binding outside
+  loopback;
+- downstream auth, credential handling, policy, audit, and rate-limit hooks
+  remain future work.
+
 ## Phase 4: UI
 
 - admin API-backed dashboard;

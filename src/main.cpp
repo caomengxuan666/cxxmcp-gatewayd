@@ -176,6 +176,21 @@ std::string admin_url(const AdminEndpoint& endpoint) {
          endpoint.path;
 }
 
+bool is_loopback_host(std::string_view host) {
+  return host == "127.0.0.1" || host == "localhost" || host == "::1" ||
+         host == "[::1]";
+}
+
+bool allow_non_loopback_bind(const Json& root) {
+  const auto security = root.find("security");
+  if (security == root.end() || !security->is_object()) {
+    return false;
+  }
+  const auto allow = security->find("allowNonLoopback");
+  return allow != security->end() && allow->is_boolean() &&
+         allow->get<bool>();
+}
+
 std::string status_to_string(mcp::gateway::UpstreamRuntimeStatus status) {
   switch (status) {
     case mcp::gateway::UpstreamRuntimeStatus::configured:
@@ -640,6 +655,7 @@ load_gatewayd_config(const std::string& path) {
   }
 
   AdminEndpoint admin;
+  const bool allow_non_loopback = allow_non_loopback_bind(root);
   if (const auto admin_json = root.find("admin");
       admin_json != root.end()) {
     if (auto error = parse_admin(*admin_json, admin)) {
@@ -647,6 +663,13 @@ load_gatewayd_config(const std::string& path) {
           static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
           "invalid admin endpoint", *error, "gatewayd.config"});
     }
+  }
+  if (!allow_non_loopback && !is_loopback_host(admin.host)) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "admin endpoint host is not loopback",
+        "set security.allowNonLoopback=true to bind outside loopback",
+        "gatewayd.config"});
   }
 
   const auto profiles_json = root.find("profiles");
@@ -687,6 +710,13 @@ load_gatewayd_config(const std::string& path) {
             static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
             "invalid profile endpoint", *error, "gatewayd.config"});
       }
+    }
+    if (!allow_non_loopback && !is_loopback_host(profile.endpoint.host)) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "profile endpoint host is not loopback",
+          item_path + ".endpoint.host requires security.allowNonLoopback=true",
+          "gatewayd.config"});
     }
 
     auto document = mcp::gateway::gateway_config_document_from_json(item);

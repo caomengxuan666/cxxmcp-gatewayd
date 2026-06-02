@@ -141,6 +141,16 @@ The daemon examples bind MCP and admin endpoints to `127.0.0.1`. Binding either
 endpoint outside loopback is a deployment/security decision and should not be
 treated as the default local middleware mode.
 
+Non-loopback binds are rejected unless the config explicitly opts in:
+
+```json
+{
+  "security": {
+    "allowNonLoopback": true
+  }
+}
+```
+
 ## Packaging
 
 The build installs the daemon, sample config, docs, and service templates.
