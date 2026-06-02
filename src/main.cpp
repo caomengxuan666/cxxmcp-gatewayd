@@ -7,6 +7,7 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -56,6 +57,7 @@ struct ProfileRuntime {
 
 struct GatewaydState {
   AdminEndpoint admin;
+  mutable std::mutex mutex;
   std::vector<std::shared_ptr<ProfileRuntime>> profiles;
 };
 
@@ -165,26 +167,28 @@ Json state_upstreams_json(const GatewaydState& state) {
     }
 
     Json runtime_states = Json::array();
-    for (const auto& runtime_state : profile->runtime->upstream_states()) {
-      Json item{
-          {"id", runtime_state.upstream_id},
-          {"status", status_to_string(runtime_state.status)},
-          {"activeCalls", runtime_state.active_calls},
-          {"persistentSessionPoolSize",
-           runtime_state.persistent_session_pool_size},
-          {"initializedPersistentSessions",
-           runtime_state.initialized_persistent_sessions},
-          {"busyPersistentSessions", runtime_state.busy_persistent_sessions},
-      };
-      if (runtime_state.last_error.has_value()) {
-        item["lastError"] = Json{
-            {"code", runtime_state.last_error->code},
-            {"message", runtime_state.last_error->message},
-            {"detail", runtime_state.last_error->detail},
-            {"category", runtime_state.last_error->category},
+    if (profile->runtime) {
+      for (const auto& runtime_state : profile->runtime->upstream_states()) {
+        Json item{
+            {"id", runtime_state.upstream_id},
+            {"status", status_to_string(runtime_state.status)},
+            {"activeCalls", runtime_state.active_calls},
+            {"persistentSessionPoolSize",
+             runtime_state.persistent_session_pool_size},
+            {"initializedPersistentSessions",
+             runtime_state.initialized_persistent_sessions},
+            {"busyPersistentSessions", runtime_state.busy_persistent_sessions},
         };
+        if (runtime_state.last_error.has_value()) {
+          item["lastError"] = Json{
+              {"code", runtime_state.last_error->code},
+              {"message", runtime_state.last_error->message},
+              {"detail", runtime_state.last_error->detail},
+              {"category", runtime_state.last_error->category},
+          };
+        }
+        runtime_states.push_back(std::move(item));
       }
-      runtime_states.push_back(std::move(item));
     }
 
     profiles.push_back(Json{
@@ -200,6 +204,17 @@ Json state_catalog_tools_json(GatewaydState& state) {
   Json profiles = Json::array();
   for (const auto& profile : state.profiles) {
     Json tools = Json::array();
+    if (!profile->runtime) {
+      profiles.push_back(Json{
+          {"id", profile->spec.id},
+          {"error",
+           Json{{"code", static_cast<int>(mcp::protocol::ErrorCode::InternalError)},
+                {"message", "profile runtime is not running"},
+                {"detail", ""},
+                {"category", "gatewayd.runtime"}}},
+      });
+      continue;
+    }
     auto listed = profile->runtime->list_tools();
     if (!listed) {
       profiles.push_back(Json{
@@ -225,6 +240,133 @@ Json state_catalog_tools_json(GatewaydState& state) {
     });
   }
   return Json{{"profiles", std::move(profiles)}};
+}
+
+Json error_json(const mcp::core::Error& error) {
+  return Json{
+      {"ok", false},
+      {"error",
+       Json{{"code", error.code},
+            {"message", error.message},
+            {"detail", error.detail},
+            {"category", error.category}}},
+  };
+}
+
+Json usage_error_json(std::string message, std::string detail = {}) {
+  return Json{
+      {"ok", false},
+      {"error",
+       Json{{"code", static_cast<int>(mcp::protocol::ErrorCode::InvalidParams)},
+            {"message", std::move(message)},
+            {"detail", std::move(detail)},
+            {"category", "gatewayd.admin"}}},
+  };
+}
+
+std::shared_ptr<ProfileRuntime> find_profile(GatewaydState& state,
+                                             std::string_view profile_id) {
+  for (auto& profile : state.profiles) {
+    if (profile->spec.id == profile_id) {
+      return profile;
+    }
+  }
+  return {};
+}
+
+mcp::core::Result<mcp::core::Unit> restart_profile(ProfileRuntime& profile) {
+  auto runtime_options =
+      mcp::gateway::make_gateway_runtime_options(profile.spec.runtime_config);
+  if (!runtime_options) {
+    return mcp::core::unexpected(runtime_options.error());
+  }
+
+  if (profile.runtime) {
+    (void)profile.runtime->stop();
+    profile.runtime.reset();
+  }
+
+  auto next = std::make_unique<mcp::gateway::GatewayRuntime>(
+      profile.spec.config, std::move(*runtime_options));
+  if (profile.spec.runtime_config.prewarm_capabilities) {
+    auto refreshed = next->refresh_upstream_capabilities();
+    if (!refreshed) {
+      return mcp::core::unexpected(refreshed.error());
+    }
+  }
+  auto started = next->start_http(profile.spec.endpoint);
+  if (!started) {
+    return mcp::core::unexpected(started.error());
+  }
+  profile.runtime = std::move(next);
+  return mcp::core::Unit{};
+}
+
+Json restart_profile_json(GatewaydState& state, const Json& args) {
+  if (!args.is_object()) {
+    return usage_error_json("gatewayd.profile.restart expects an object");
+  }
+  const auto profile_arg = args.find("profile");
+  if (profile_arg == args.end() || !profile_arg->is_string()) {
+    return usage_error_json("missing profile", "expected string field profile");
+  }
+
+  std::lock_guard lock(state.mutex);
+  auto profile = find_profile(state, profile_arg->get<std::string>());
+  if (!profile) {
+    return usage_error_json("unknown profile", profile_arg->get<std::string>());
+  }
+
+  auto restarted = restart_profile(*profile);
+  if (!restarted) {
+    return error_json(restarted.error());
+  }
+  return Json{
+      {"ok", true},
+      {"profile", profile->spec.id},
+      {"mcpUrl", http_url(profile->spec.endpoint)},
+  };
+}
+
+Json set_upstream_enabled_json(GatewaydState& state,
+                               const Json& args,
+                               bool enabled) {
+  if (!args.is_object()) {
+    return usage_error_json("gatewayd.upstream enable/disable expects an object");
+  }
+  const auto profile_arg = args.find("profile");
+  const auto upstream_arg = args.find("upstream");
+  if (profile_arg == args.end() || !profile_arg->is_string()) {
+    return usage_error_json("missing profile", "expected string field profile");
+  }
+  if (upstream_arg == args.end() || !upstream_arg->is_string()) {
+    return usage_error_json("missing upstream", "expected string field upstream");
+  }
+
+  std::lock_guard lock(state.mutex);
+  auto profile = find_profile(state, profile_arg->get<std::string>());
+  if (!profile) {
+    return usage_error_json("unknown profile", profile_arg->get<std::string>());
+  }
+
+  const auto upstream_id = upstream_arg->get<std::string>();
+  for (auto& upstream : profile->spec.config.upstreams) {
+    if (upstream.id != upstream_id) {
+      continue;
+    }
+    const bool changed = upstream.enabled != enabled;
+    upstream.enabled = enabled;
+    return Json{
+        {"ok", true},
+        {"profile", profile->spec.id},
+        {"upstream", upstream.id},
+        {"enabled", upstream.enabled},
+        {"changed", changed},
+        {"runtimeRestartRequired", true},
+    };
+  }
+
+  return usage_error_json("unknown upstream", upstream_id);
 }
 
 std::optional<std::string> parse_endpoint(const Json& json,
@@ -379,18 +521,39 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
           .tool<Json, ToolResult>(
               "gatewayd.health",
               [state](const Json&) {
+                std::lock_guard lock(state->mutex);
                 return ToolResult::text(state_health_json(*state).dump(2));
               })
           .tool<Json, ToolResult>(
               "gatewayd.upstreams",
               [state](const Json&) {
+                std::lock_guard lock(state->mutex);
                 return ToolResult::text(state_upstreams_json(*state).dump(2));
               })
           .tool<Json, ToolResult>(
               "gatewayd.catalog.tools",
               [state](const Json&) {
+                std::lock_guard lock(state->mutex);
                 return ToolResult::text(
                     state_catalog_tools_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.upstream.enable",
+              [state](const Json& args) {
+                return ToolResult::text(
+                    set_upstream_enabled_json(*state, args, true).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.upstream.disable",
+              [state](const Json& args) {
+                return ToolResult::text(
+                    set_upstream_enabled_json(*state, args, false).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.profile.restart",
+              [state](const Json& args) {
+                return ToolResult::text(
+                    restart_profile_json(*state, args).dump(2));
               })
           .build();
   if (!peer) {

@@ -7,12 +7,14 @@
 - expose a separate admin endpoint;
 - load a JSON config file;
 - validate config without starting endpoints;
-- report health, upstreams, and tool catalog state.
+- report health, upstreams, and tool catalog state;
+- update in-memory upstream enabled state;
+- restart a profile to apply changed desired config.
 
 ## Phase 1: Local Middleware MVP
 
 - stable config file discovery;
-- explicit enable/disable upstream operations;
+- explicit persisted enable/disable upstream operations;
 - reload validated config;
 - status and event APIs;
 - CLI commands for `run`, `status`, `reload`, and upstream management;

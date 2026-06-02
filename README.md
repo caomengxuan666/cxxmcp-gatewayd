@@ -71,6 +71,31 @@ servers. Enable real upstreams to test end-to-end routing.
 - `gatewayd.health`
 - `gatewayd.upstreams`
 - `gatewayd.catalog.tools`
+- `gatewayd.upstream.enable`
+- `gatewayd.upstream.disable`
+- `gatewayd.profile.restart`
+
+`gatewayd.upstream.enable` and `gatewayd.upstream.disable` update the in-memory
+desired config for one profile and return `runtimeRestartRequired: true`.
+`gatewayd.profile.restart` applies the desired config by restarting that
+profile's MCP endpoint.
+
+Example admin tool arguments:
+
+```json
+{
+  "profile": "default",
+  "upstream": "filesystem"
+}
+```
+
+Restart argument:
+
+```json
+{
+  "profile": "default"
+}
+```
 
 ## Boundary
 
