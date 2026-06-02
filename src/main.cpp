@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdlib>
 #include <csignal>
 #include <cstdint>
 #include <fstream>
@@ -10,6 +12,7 @@
 #include <mutex>
 #include <optional>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -57,17 +60,24 @@ struct ProfileRuntime {
 
 struct GatewaydState {
   AdminEndpoint admin;
+  std::string config_path;
+  std::uint64_t next_event_id = 1;
   mutable std::mutex mutex;
   std::vector<std::shared_ptr<ProfileRuntime>> profiles;
+  std::vector<Json> events;
 };
 
 void print_usage(std::ostream& out) {
   out << "Usage:\n"
       << "  cxxmcp-gatewayd --help\n"
       << "  cxxmcp-gatewayd --version\n"
-      << "  cxxmcp-gatewayd validate --config <file>\n"
-      << "  cxxmcp-gatewayd run --config <file>\n"
+      << "  cxxmcp-gatewayd validate [--config <file>]\n"
+      << "  cxxmcp-gatewayd run [--config <file>]\n"
       << "  cxxmcp-gatewayd --config <file>   # legacy alias for run\n\n"
+      << "Config discovery without --config:\n"
+      << "  1. CXXMCP_GATEWAYD_CONFIG\n"
+      << "  2. ./gatewayd.json\n"
+      << "  3. ./gatewayd.config.json\n\n"
       << "Config shape:\n"
       << "  {\n"
       << "    \"admin\": {\"host\":\"127.0.0.1\", \"port\":39932, "
@@ -81,9 +91,58 @@ void print_usage(std::ostream& out) {
 
 std::string read_text_file(const std::string& path) {
   std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    throw std::runtime_error("failed to open " + path);
+  }
   std::ostringstream buffer;
   buffer << input.rdbuf();
   return buffer.str();
+}
+
+void write_text_file(const std::string& path, std::string_view text) {
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output) {
+    throw std::runtime_error("failed to open " + path + " for writing");
+  }
+  output.write(text.data(), static_cast<std::streamsize>(text.size()));
+  if (!output) {
+    throw std::runtime_error("failed to write " + path);
+  }
+}
+
+bool readable_file(std::string_view path) {
+  std::ifstream input(std::string(path), std::ios::binary);
+  return static_cast<bool>(input);
+}
+
+std::optional<std::string> discover_config_path() {
+  if (const char* env = std::getenv("CXXMCP_GATEWAYD_CONFIG");
+      env != nullptr && *env != '\0') {
+    return std::string(env);
+  }
+  for (std::string_view candidate : {"gatewayd.json", "gatewayd.config.json"}) {
+    if (readable_file(candidate)) {
+      return std::string(candidate);
+    }
+  }
+  return std::nullopt;
+}
+
+void record_event(GatewaydState& state,
+                  std::string type,
+                  Json detail = Json::object()) {
+  Json event{
+      {"id", state.next_event_id++},
+      {"type", std::move(type)},
+      {"detail", std::move(detail)},
+  };
+  state.events.push_back(std::move(event));
+  if (state.events.size() > 256) {
+    state.events.erase(state.events.begin(),
+                       state.events.begin() +
+                           static_cast<std::ptrdiff_t>(state.events.size() -
+                                                       256));
+  }
 }
 
 std::optional<std::string> require_string(const Json& object,
@@ -150,8 +209,13 @@ Json state_health_json(const GatewaydState& state) {
   return Json{
       {"status", "ok"},
       {"adminUrl", admin_url(state.admin)},
+      {"configPath", state.config_path},
       {"profiles", std::move(profiles)},
   };
+}
+
+Json state_events_json(const GatewaydState& state) {
+  return Json{{"events", state.events}};
 }
 
 Json state_upstreams_json(const GatewaydState& state) {
@@ -274,31 +338,71 @@ std::shared_ptr<ProfileRuntime> find_profile(GatewaydState& state,
   return {};
 }
 
-mcp::core::Result<mcp::core::Unit> restart_profile(ProfileRuntime& profile) {
+mcp::core::Result<std::shared_ptr<ProfileRuntime>> start_profile(
+    ProfileSpec spec) {
   auto runtime_options =
-      mcp::gateway::make_gateway_runtime_options(profile.spec.runtime_config);
+      mcp::gateway::make_gateway_runtime_options(spec.runtime_config);
   if (!runtime_options) {
     return mcp::core::unexpected(runtime_options.error());
   }
 
-  if (profile.runtime) {
-    (void)profile.runtime->stop();
-    profile.runtime.reset();
-  }
-
+  auto profile = std::make_shared<ProfileRuntime>();
+  profile->spec = std::move(spec);
   auto next = std::make_unique<mcp::gateway::GatewayRuntime>(
-      profile.spec.config, std::move(*runtime_options));
-  if (profile.spec.runtime_config.prewarm_capabilities) {
+      profile->spec.config, std::move(*runtime_options));
+  if (profile->spec.runtime_config.prewarm_capabilities) {
     auto refreshed = next->refresh_upstream_capabilities();
     if (!refreshed) {
       return mcp::core::unexpected(refreshed.error());
     }
   }
-  auto started = next->start_http(profile.spec.endpoint);
+  auto started = next->start_http(profile->spec.endpoint);
   if (!started) {
     return mcp::core::unexpected(started.error());
   }
-  profile.runtime = std::move(next);
+  profile->runtime = std::move(next);
+  return profile;
+}
+
+mcp::core::Result<std::vector<std::shared_ptr<ProfileRuntime>>> start_profiles(
+    std::vector<ProfileSpec> specs) {
+  std::vector<std::shared_ptr<ProfileRuntime>> profiles;
+  for (auto& spec : specs) {
+    auto profile = start_profile(std::move(spec));
+    if (!profile) {
+      for (auto& started : profiles) {
+        if (started->runtime) {
+          (void)started->runtime->stop();
+        }
+      }
+      return mcp::core::unexpected(profile.error());
+    }
+    profiles.push_back(std::move(*profile));
+  }
+  return profiles;
+}
+
+void stop_profiles(
+    const std::vector<std::shared_ptr<ProfileRuntime>>& profiles) noexcept {
+  for (const auto& profile : profiles) {
+    if (profile && profile->runtime) {
+      (void)profile->runtime->stop();
+      profile->runtime.reset();
+    }
+  }
+}
+
+mcp::core::Result<mcp::core::Unit> restart_profile(ProfileRuntime& profile) {
+  if (profile.runtime) {
+    (void)profile.runtime->stop();
+    profile.runtime.reset();
+  }
+
+  auto restarted = start_profile(profile.spec);
+  if (!restarted) {
+    return mcp::core::unexpected(restarted.error());
+  }
+  profile.runtime = std::move((*restarted)->runtime);
   return mcp::core::Unit{};
 }
 
@@ -319,13 +423,83 @@ Json restart_profile_json(GatewaydState& state, const Json& args) {
 
   auto restarted = restart_profile(*profile);
   if (!restarted) {
+    record_event(state, "profile.restart.failed",
+                 Json{{"profile", profile->spec.id},
+                      {"error", error_json(restarted.error())["error"]}});
     return error_json(restarted.error());
   }
+  record_event(state, "profile.restarted",
+               Json{{"profile", profile->spec.id},
+                    {"mcpUrl", http_url(profile->spec.endpoint)}});
   return Json{
       {"ok", true},
       {"profile", profile->spec.id},
       {"mcpUrl", http_url(profile->spec.endpoint)},
   };
+}
+
+mcp::core::Result<mcp::core::Unit> persist_upstream_enabled(
+    const std::string& path,
+    const std::string& profile_id,
+    const std::string& upstream_id,
+    bool enabled) {
+  Json root;
+  try {
+    root = Json::parse(read_text_file(path));
+  } catch (const std::exception& ex) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::ParseError),
+        "failed to parse gatewayd config for update", ex.what(),
+        "gatewayd.config"});
+  }
+
+  auto profiles = root.find("profiles");
+  if (profiles == root.end() || !profiles->is_array()) {
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "gatewayd config requires a profiles array", "",
+        "gatewayd.config"});
+  }
+
+  for (auto& profile : *profiles) {
+    const auto id = profile.find("id");
+    if (id == profile.end() || !id->is_string() ||
+        id->get<std::string>() != profile_id) {
+      continue;
+    }
+    auto upstreams = profile.find("upstreams");
+    if (upstreams == profile.end() || !upstreams->is_array()) {
+      return mcp::core::unexpected(mcp::core::Error{
+          static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+          "gatewayd profile requires an upstreams array", profile_id,
+          "gatewayd.config"});
+    }
+    for (auto& upstream : *upstreams) {
+      const auto upstream_json_id = upstream.find("id");
+      if (upstream_json_id == upstream.end() ||
+          !upstream_json_id->is_string() ||
+          upstream_json_id->get<std::string>() != upstream_id) {
+        continue;
+      }
+      upstream["enabled"] = enabled;
+      try {
+        write_text_file(path, root.dump(2) + "\n");
+      } catch (const std::exception& ex) {
+        return mcp::core::unexpected(mcp::core::Error{
+            static_cast<int>(mcp::protocol::ErrorCode::InternalError),
+            "failed to write gatewayd config", ex.what(),
+            "gatewayd.config"});
+      }
+      return mcp::core::Unit{};
+    }
+    return mcp::core::unexpected(mcp::core::Error{
+        static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+        "unknown upstream in config", upstream_id, "gatewayd.config"});
+  }
+
+  return mcp::core::unexpected(mcp::core::Error{
+      static_cast<int>(mcp::protocol::ErrorCode::InvalidParams),
+      "unknown profile in config", profile_id, "gatewayd.config"});
 }
 
 Json set_upstream_enabled_json(GatewaydState& state,
@@ -348,6 +522,10 @@ Json set_upstream_enabled_json(GatewaydState& state,
   if (!profile) {
     return usage_error_json("unknown profile", profile_arg->get<std::string>());
   }
+  if (state.config_path.empty()) {
+    return usage_error_json("missing config path",
+                            "persistent updates require a loaded config file");
+  }
 
   const auto upstream_id = upstream_arg->get<std::string>();
   for (auto& upstream : profile->spec.config.upstreams) {
@@ -355,13 +533,29 @@ Json set_upstream_enabled_json(GatewaydState& state,
       continue;
     }
     const bool changed = upstream.enabled != enabled;
+    auto persisted = persist_upstream_enabled(
+        state.config_path, profile->spec.id, upstream.id, enabled);
+    if (!persisted) {
+      record_event(state, enabled ? "upstream.enable.failed"
+                                  : "upstream.disable.failed",
+                   Json{{"profile", profile->spec.id},
+                        {"upstream", upstream.id},
+                        {"error", error_json(persisted.error())["error"]}});
+      return error_json(persisted.error());
+    }
     upstream.enabled = enabled;
+    record_event(state, enabled ? "upstream.enabled" : "upstream.disabled",
+                 Json{{"profile", profile->spec.id},
+                      {"upstream", upstream.id},
+                      {"changed", changed},
+                      {"persisted", true}});
     return Json{
         {"ok", true},
         {"profile", profile->spec.id},
         {"upstream", upstream.id},
         {"enabled", upstream.enabled},
         {"changed", changed},
+        {"persisted", true},
         {"runtimeRestartRequired", true},
     };
   }
@@ -510,6 +704,59 @@ void print_config_summary(const AdminEndpoint& admin,
   }
 }
 
+bool same_admin_endpoint(const AdminEndpoint& lhs, const AdminEndpoint& rhs) {
+  return lhs.host == rhs.host && lhs.port == rhs.port && lhs.path == rhs.path;
+}
+
+Json reload_config_json(GatewaydState& state, const Json&) {
+  std::lock_guard lock(state.mutex);
+  if (state.config_path.empty()) {
+    return usage_error_json("missing config path",
+                            "reload requires a loaded config file");
+  }
+
+  auto loaded = load_gatewayd_config(state.config_path);
+  if (!loaded) {
+    record_event(state, "config.reload.failed",
+                 Json{{"error", error_json(loaded.error())["error"]}});
+    return error_json(loaded.error());
+  }
+  if (!same_admin_endpoint(state.admin, loaded->first)) {
+    auto result = usage_error_json(
+        "admin endpoint change requires daemon restart",
+        "profile endpoints can reload in-process; admin endpoint cannot");
+    record_event(state, "config.reload.failed",
+                 Json{{"error", result["error"]}});
+    return result;
+  }
+
+  auto previous = std::move(state.profiles);
+  stop_profiles(previous);
+
+  auto started = start_profiles(std::move(loaded->second));
+  if (!started) {
+    for (const auto& profile : previous) {
+      if (profile) {
+        (void)restart_profile(*profile);
+      }
+    }
+    state.profiles = std::move(previous);
+    record_event(state, "config.reload.failed",
+                 Json{{"error", error_json(started.error())["error"]}});
+    return error_json(started.error());
+  }
+
+  state.profiles = std::move(*started);
+  record_event(state, "config.reloaded",
+               Json{{"configPath", state.config_path},
+                    {"profileCount", state.profiles.size()}});
+  return Json{
+      {"ok", true},
+      {"configPath", state.config_path},
+      {"profileCount", state.profiles.size()},
+  };
+}
+
 mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
     const std::shared_ptr<GatewaydState>& state) {
   auto peer =
@@ -536,6 +783,17 @@ mcp::core::Result<mcp::RunningService<mcp::RoleServer>> start_admin_service(
                 std::lock_guard lock(state->mutex);
                 return ToolResult::text(
                     state_catalog_tools_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.events",
+              [state](const Json&) {
+                std::lock_guard lock(state->mutex);
+                return ToolResult::text(state_events_json(*state).dump(2));
+              })
+          .tool<Json, ToolResult>(
+              "gatewayd.reload",
+              [state](const Json& args) {
+                return ToolResult::text(reload_config_json(*state, args).dump(2));
               })
           .tool<Json, ToolResult>(
               "gatewayd.upstream.enable",
@@ -586,21 +844,31 @@ int main(int argc, char** argv) {
 
   enum class Command { run, validate };
   Command command = Command::run;
-  std::string_view config_path;
+  std::string config_path;
 
   if (args.size() == 2 && args[0] == "--config") {
-    config_path = args[1];
+    config_path = std::string(args[1]);
+  } else if (args.size() == 1 &&
+             (args[0] == "run" || args[0] == "validate")) {
+    command = args[0] == "validate" ? Command::validate : Command::run;
+    auto discovered = discover_config_path();
+    if (!discovered) {
+      std::cerr << "failed to discover gatewayd config; pass --config or set "
+                   "CXXMCP_GATEWAYD_CONFIG\n";
+      return 2;
+    }
+    config_path = std::move(*discovered);
   } else if (args.size() == 3 &&
              (args[0] == "run" || args[0] == "validate") &&
              args[1] == "--config") {
     command = args[0] == "validate" ? Command::validate : Command::run;
-    config_path = args[2];
+    config_path = std::string(args[2]);
   } else {
     print_usage(std::cerr);
     return 2;
   }
 
-  auto loaded = load_gatewayd_config(std::string(config_path));
+  auto loaded = load_gatewayd_config(config_path);
   if (!loaded) {
     std::cerr << "failed to load gatewayd config: "
               << loaded.error().message;
@@ -618,42 +886,25 @@ int main(int argc, char** argv) {
 
   auto state = std::make_shared<GatewaydState>();
   state->admin = std::move(loaded->first);
+  state->config_path = config_path;
 
-  for (auto& spec : loaded->second) {
-    auto runtime_options =
-        mcp::gateway::make_gateway_runtime_options(spec.runtime_config);
-    if (!runtime_options) {
-      std::cerr << "invalid runtime config for profile " << spec.id << ": "
-                << runtime_options.error().message << "\n";
-      return 2;
+  auto profiles = start_profiles(std::move(loaded->second));
+  if (!profiles) {
+    std::cerr << "failed to start profiles: " << profiles.error().message;
+    if (!profiles.error().detail.empty()) {
+      std::cerr << ": " << profiles.error().detail;
     }
-
-    auto profile = std::make_shared<ProfileRuntime>();
-    profile->spec = std::move(spec);
-    profile->runtime = std::make_unique<mcp::gateway::GatewayRuntime>(
-        profile->spec.config, std::move(*runtime_options));
-    if (profile->spec.runtime_config.prewarm_capabilities) {
-      auto refreshed = profile->runtime->refresh_upstream_capabilities();
-      if (!refreshed) {
-        std::cerr << "failed to prewarm profile " << profile->spec.id << ": "
-                  << refreshed.error().message << "\n";
-        return 1;
-      }
-    }
-    auto started = profile->runtime->start_http(profile->spec.endpoint);
-    if (!started) {
-      std::cerr << "failed to start profile " << profile->spec.id << ": "
-                << started.error().message;
-      if (!started.error().detail.empty()) {
-        std::cerr << ": " << started.error().detail;
-      }
-      std::cerr << "\n";
-      return 1;
-    }
+    std::cerr << "\n";
+    return 1;
+  }
+  state->profiles = std::move(*profiles);
+  for (const auto& profile : state->profiles) {
     std::cout << "profile " << profile->spec.id << " listening on "
               << http_url(profile->spec.endpoint) << std::endl;
-    state->profiles.push_back(std::move(profile));
   }
+  record_event(*state, "daemon.started",
+               Json{{"configPath", state->config_path},
+                    {"profileCount", state->profiles.size()}});
 
   auto admin = start_admin_service(state);
   if (!admin) {
@@ -674,7 +925,9 @@ int main(int argc, char** argv) {
 
   (void)admin->stop();
   for (auto& profile : state->profiles) {
-    (void)profile->runtime->stop();
+    if (profile->runtime) {
+      (void)profile->runtime->stop();
+    }
   }
   return 0;
 }

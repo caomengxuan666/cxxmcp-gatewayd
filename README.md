@@ -38,7 +38,7 @@ this daemon is being developed:
 
 ```powershell
 cmake -S . -B build -G Ninja `
-  -DCMAKE_BUILD_TYPE=Debug `
+  -DCMAKE_BUILD_TYPE=Release `
   -Dcxxmcp_DIR=C:\Users\cmx\repo\cxxmcp-sdk-perf-install\lib\cmake\cxxmcp `
   -DCXXMCP_GATEWAYD_GATEWAY_SOURCE_DIR=C:\Users\cmx\repo\cxxmcp-gateway
 
@@ -63,6 +63,12 @@ Run the daemon:
 build\cxxmcp-gatewayd.exe run --config examples\gatewayd.example.json
 ```
 
+Without `--config`, `run` and `validate` discover config in this order:
+
+1. `CXXMCP_GATEWAYD_CONFIG`
+2. `gatewayd.json`
+3. `gatewayd.config.json`
+
 The sample upstreams are disabled, so the daemon can start without external MCP
 servers. Enable real upstreams to test end-to-end routing.
 
@@ -71,14 +77,18 @@ servers. Enable real upstreams to test end-to-end routing.
 - `gatewayd.health`
 - `gatewayd.upstreams`
 - `gatewayd.catalog.tools`
+- `gatewayd.events`
+- `gatewayd.reload`
 - `gatewayd.upstream.enable`
 - `gatewayd.upstream.disable`
 - `gatewayd.profile.restart`
 
-`gatewayd.upstream.enable` and `gatewayd.upstream.disable` update the in-memory
-desired config for one profile and return `runtimeRestartRequired: true`.
-`gatewayd.profile.restart` applies the desired config by restarting that
-profile's MCP endpoint.
+`gatewayd.upstream.enable` and `gatewayd.upstream.disable` update the loaded
+config file and the in-memory desired config for one profile, then return
+`runtimeRestartRequired: true`. `gatewayd.profile.restart` applies the desired
+config by restarting that profile's MCP endpoint. `gatewayd.reload` reloads the
+config file and hot-replaces profile runtimes after validation. Admin endpoint
+host, port, or path changes require restarting the daemon.
 
 Example admin tool arguments:
 

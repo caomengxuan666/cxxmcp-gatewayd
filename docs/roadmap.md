@@ -20,6 +20,18 @@
 - CLI commands for `run`, `status`, `reload`, and upstream management;
 - documented loopback-only defaults.
 
+Current status:
+
+- config discovery is implemented for `CXXMCP_GATEWAYD_CONFIG`,
+  `gatewayd.json`, and `gatewayd.config.json`;
+- upstream enable/disable operations persist to the loaded config file and
+  update desired in-memory config;
+- `gatewayd.reload` reloads and validates profile config, while admin endpoint
+  changes require daemon restart;
+- `gatewayd.health`, `gatewayd.upstreams`, and `gatewayd.events` provide the
+  first status/event surface;
+- CLI management commands beyond `run` and `validate` remain pending.
+
 ## Phase 2: Operational Service
 
 - Windows service support;
